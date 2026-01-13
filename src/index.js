@@ -33,8 +33,7 @@ const {
   POST_OPP_SECRET,
 } = process.env;
 
-// Render can provide PORT as string; could be empty if misconfigured.
-// This guarantees a safe port value.
+// Safe port parsing for Render
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
 
 if (!DISCORD_TOKEN) {
@@ -71,8 +70,7 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
 });
 
-// We'll add the Join Bulk interaction handler next step.
-// For now we only keep a ping test.
+// We'll add Join Bulk handler next step
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -112,11 +110,9 @@ function formatPercent(v) {
 }
 
 function getAirtableAttachmentUrl(fieldValue) {
-  // Airtable attachment: [{url, filename, ...}]
   if (Array.isArray(fieldValue) && fieldValue.length > 0 && fieldValue[0]?.url) {
     return fieldValue[0].url;
   }
-  // If stored as plain URL string
   if (typeof fieldValue === "string" && fieldValue.startsWith("http")) {
     return fieldValue;
   }
@@ -163,12 +159,11 @@ function buildOpportunityEmbed(fields) {
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
 
-  // Small image top-right
+  // Small image in top-right corner
   if (picUrl) embed.setThumbnail(picUrl);
 
   return embed;
 }
-
 
 /* =========================
    Express
@@ -194,38 +189,35 @@ app.get("/airtable-test", async (req, res) => {
 
 /**
  * POST /post-opportunity
- * Called by Airtable automation when "Post Now" is checked.
  * Body: { opportunityRecordId: "recXXXX" }
  * Header: x-post-secret: <POST_OPP_SECRET>
  */
 app.post("/post-opportunity", async (req, res) => {
   try {
-    if (!requireSecret(req, res)) return;
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
 
     if (!BULK_PUBLIC_CHANNEL_ID) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "BULK_PUBLIC_CHANNEL_ID not set" });
+      return res.status(500).json({ ok: false, error: "BULK_PUBLIC_CHANNEL_ID not set" });
     }
 
     const { opportunityRecordId } = req.body || {};
     if (!opportunityRecordId) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "opportunityRecordId is required" });
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
     const opp = await oppsTable.find(opportunityRecordId);
     const fields = opp.fields || {};
 
-    // Prevent double-posting
-    const existingMsgId = fields["Discord Public Message ID"];
-    if (existingMsgId) {
+    // Prevent double posting
+    if (fields["Discord Public Message ID"]) {
       return res.json({
         ok: true,
         skipped: true,
         reason: "Already posted",
-        messageId: existingMsgId,
+        messageId: fields["Discord Public Message ID"],
       });
     }
 
@@ -240,9 +232,7 @@ app.post("/post-opportunity", async (req, res) => {
 
     const channel = await client.channels.fetch(BULK_PUBLIC_CHANNEL_ID);
     if (!channel || !channel.isTextBased()) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Channel not found or not text-based" });
+      return res.status(500).json({ ok: false, error: "Channel not found or not text-based" });
     }
 
     const msg = await channel.send({ embeds: [embed], components: [row] });
@@ -254,7 +244,6 @@ app.post("/post-opportunity", async (req, res) => {
       "Post Now": false,
     };
 
-    // Only set Posted At if that field exists on the record
     if (fields["Posted At"] !== undefined) {
       updatePayload["Posted At"] = new Date().toISOString();
     }
@@ -270,20 +259,19 @@ app.post("/post-opportunity", async (req, res) => {
 
 /**
  * POST /sync-opportunity
- * Called by Airtable automation when any live fields change.
- * Rebuilds the embed and edits the already-posted Discord message.
  * Body: { opportunityRecordId: "recXXXX" }
  * Header: x-post-secret: <POST_OPP_SECRET>
  */
 app.post("/sync-opportunity", async (req, res) => {
   try {
-    if (!requireSecret(req, res)) return;
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
 
     const { opportunityRecordId } = req.body || {};
     if (!opportunityRecordId) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "opportunityRecordId is required" });
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
     const opp = await oppsTable.find(opportunityRecordId);
@@ -295,16 +283,13 @@ app.post("/sync-opportunity", async (req, res) => {
     if (!channelId || !messageId) {
       return res.status(400).json({
         ok: false,
-        error:
-          "Missing Discord Public Channel ID or Discord Public Message ID on opportunity",
+        error: "Missing Discord Public Channel ID or Discord Public Message ID",
       });
     }
 
     const channel = await client.channels.fetch(String(channelId));
     if (!channel || !channel.isTextBased()) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "Channel not found or not text-based" });
+      return res.status(500).json({ ok: false, error: "Channel not found or not text-based" });
     }
 
     const message = await channel.messages.fetch(String(messageId));
