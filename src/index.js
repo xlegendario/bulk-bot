@@ -13,26 +13,28 @@ import {
   ButtonStyle,
 } from "discord.js";
 
-/**
- * ENV VARS REQUIRED ON RENDER
- */
+/* =========================
+   ENV
+========================= */
+
 const {
   DISCORD_TOKEN,
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
 
-  // Table names (set exactly to your Airtable tables)
+  // Airtable tables
   AIRTABLE_BUYERS_TABLE = "Buyers",
   AIRTABLE_OPPS_TABLE = "Opportunities",
 
-  // Where to post public opportunities
+  // Discord channel where public opportunities are posted
   BULK_PUBLIC_CHANNEL_ID,
 
-  // Secret to protect /post-opportunity endpoint
+  // Shared secret for /post-opportunity and /sync-opportunity
   POST_OPP_SECRET,
 } = process.env;
 
-// Render can provide PORT as a string (or it can be blank if misconfigured).
+// Render can provide PORT as string; could be empty if misconfigured.
+// This guarantees a safe port value.
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
 
 if (!DISCORD_TOKEN) {
@@ -44,26 +46,24 @@ if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
   process.exit(1);
 }
 
-/**
- * Airtable
- */
+/* =========================
+   Airtable
+========================= */
+
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const buyersTable = base(AIRTABLE_BUYERS_TABLE);
 const oppsTable = base(AIRTABLE_OPPS_TABLE);
 
-// quick sanity test on startup (doesn't fetch records)
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 console.log("✅ Buyers table name:", AIRTABLE_BUYERS_TABLE);
 console.log("✅ Opportunities table name:", AIRTABLE_OPPS_TABLE);
 
-/**
- * Discord client
- */
+/* =========================
+   Discord Client
+========================= */
+
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    // keep minimal for now
-  ],
+  intents: [GatewayIntentBits.Guilds],
   partials: [Partials.Channel],
 });
 
@@ -71,9 +71,8 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
 });
 
-/**
- * Minimal interaction placeholder (we add bulk logic next)
- */
+// We'll add the Join Bulk interaction handler next step.
+// For now we only keep a ping test.
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
 
@@ -82,9 +81,99 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-/**
- * Express healthcheck for Render
- */
+/* =========================
+   Helpers
+========================= */
+
+function currencySymbol(code) {
+  const c = String(code || "").toUpperCase();
+  if (c === "EUR") return "€";
+  if (c === "USD") return "$";
+  if (c === "GBP") return "£";
+  return c ? `${c} ` : "";
+}
+
+function formatMoney(code, value) {
+  if (value === undefined || value === null || value === "") return "—";
+  const num = Number(value);
+  if (Number.isNaN(num)) return "—";
+  const sym = currencySymbol(code);
+  const formatted = num % 1 === 0 ? num.toFixed(0) : num.toFixed(2);
+  return `${sym}${formatted}`;
+}
+
+function formatPercent(v) {
+  if (v === undefined || v === null || v === "") return "—";
+  const num = Number(v);
+  if (Number.isNaN(num)) return "—";
+  // Airtable percent fields often return 0.04 for 4%
+  const pct = (num * 100).toFixed(2).replace(/\.00$/, "");
+  return `${pct}%`;
+}
+
+function getAirtableAttachmentUrl(fieldValue) {
+  // Airtable attachment: [{url, filename, ...}]
+  if (Array.isArray(fieldValue) && fieldValue.length > 0 && fieldValue[0]?.url) {
+    return fieldValue[0].url;
+  }
+  // If stored as plain URL string
+  if (typeof fieldValue === "string" && fieldValue.startsWith("http")) {
+    return fieldValue;
+  }
+  return null;
+}
+
+function buildOpportunityEmbed(fields) {
+  const productName = fields["Product Name"] || "Bulk Opportunity";
+  const sku = fields["SKU (Soft)"] || fields["SKU"] || "—";
+  const minSize = fields["Min Size"] || "—";
+  const maxSize = fields["Max Size"] || "—";
+  const currency = fields["Currency"] || "EUR";
+
+  const currentPrice = formatMoney(currency, fields["Current Sell Price"]);
+  const currentDiscount = formatPercent(fields["Current Discount %"]);
+  const currentTotalPairs = fields["Current Total Pairs"] ?? "—";
+  const nextMinPairs = fields["Next Tier Min Pairs"] ?? "—";
+  const nextDiscount = formatPercent(fields["Next Tier Discount %"]);
+
+  const picUrl = getAirtableAttachmentUrl(fields["Picture"]);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📦 ${productName}`)
+    .addFields(
+      { name: "SKU", value: `\`${sku}\``, inline: true },
+      { name: "Size Range", value: `EU ${minSize} → ${maxSize}`, inline: true },
+
+      { name: "Current Price", value: `**${currentPrice}**`, inline: true },
+      { name: "Current Discount", value: `**${currentDiscount}**`, inline: true },
+
+      { name: "Current Total Pairs", value: `**${currentTotalPairs}**`, inline: true },
+      { name: "MOQ for next discount", value: `**${nextMinPairs}**`, inline: true },
+
+      { name: "Next Tier Discount", value: `**${nextDiscount}**`, inline: true }
+    )
+    .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
+    .setColor(0xffd300);
+
+  // Add picture as big image (recommended for product)
+  if (picUrl) embed.setImage(picUrl);
+
+  return embed;
+}
+
+function requireSecret(req, res) {
+  const incomingSecret = req.header("x-post-secret") || "";
+  if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+/* =========================
+   Express
+========================= */
+
 const app = express();
 app.use(morgan("tiny"));
 app.use(express.json());
@@ -93,7 +182,6 @@ app.get("/", async (req, res) => {
   res.send("Bulk bot is live ✅");
 });
 
-// Optional: Airtable connectivity test endpoint
 app.get("/airtable-test", async (req, res) => {
   try {
     const records = await buyersTable.select({ maxRecords: 1 }).firstPage();
@@ -106,17 +194,13 @@ app.get("/airtable-test", async (req, res) => {
 
 /**
  * POST /post-opportunity
- * Called by Airtable Automation when "Post Now" is checked.
+ * Called by Airtable automation when "Post Now" is checked.
  * Body: { opportunityRecordId: "recXXXX" }
  * Header: x-post-secret: <POST_OPP_SECRET>
  */
 app.post("/post-opportunity", async (req, res) => {
   try {
-    // Security check
-    const incomingSecret = req.header("x-post-secret") || "";
-    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
-      return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
+    if (!requireSecret(req, res)) return;
 
     if (!BULK_PUBLIC_CHANNEL_ID) {
       return res
@@ -131,7 +215,6 @@ app.post("/post-opportunity", async (req, res) => {
         .json({ ok: false, error: "opportunityRecordId is required" });
     }
 
-    // Fetch Opportunity from Airtable
     const opp = await oppsTable.find(opportunityRecordId);
     const fields = opp.fields || {};
 
@@ -146,32 +229,8 @@ app.post("/post-opportunity", async (req, res) => {
       });
     }
 
-    // Minimal fields used for the first version embed
-    const oppId = fields["Opportunity ID"] || opportunityRecordId;
-    const productName = fields["Product Name"] || "Bulk Opportunity";
-    const skuSoft = fields["SKU (Soft)"] || fields["SKU"] || "—";
-    const minSize = fields["Min Size"] || "—";
-    const maxSize = fields["Max Size"] || "—";
-    const startSell = fields["Start Sell Price"] ?? "—";
-    const currency = fields["Currency"] || "EUR";
+    const embed = buildOpportunityEmbed(fields);
 
-    // Build embed
-    const embed = new EmbedBuilder()
-      .setTitle(`📦 ${productName}`)
-      .setDescription(
-        [
-          `**Opportunity:** \`${oppId}\``,
-          `**SKU:** \`${skuSoft}\``,
-          `**Sizes:** \`${minSize} → ${maxSize}\``,
-          "",
-          `**Start price:** ${currency} ${startSell}`,
-          "",
-          "_Join with any quantity — even 1–2 pairs._",
-        ].join("\n")
-      )
-      .setColor(0xffd300);
-
-    // Button: Join Bulk
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`opp_join:${opportunityRecordId}`)
@@ -179,7 +238,6 @@ app.post("/post-opportunity", async (req, res) => {
         .setStyle(ButtonStyle.Success)
     );
 
-    // Post to Discord channel
     const channel = await client.channels.fetch(BULK_PUBLIC_CHANNEL_ID);
     if (!channel || !channel.isTextBased()) {
       return res
@@ -196,7 +254,7 @@ app.post("/post-opportunity", async (req, res) => {
       "Post Now": false,
     };
 
-    // Only write Posted At if the field exists in Airtable
+    // Only set Posted At if that field exists on the record
     if (fields["Posted At"] !== undefined) {
       updatePayload["Posted At"] = new Date().toISOString();
     }
@@ -210,9 +268,72 @@ app.post("/post-opportunity", async (req, res) => {
   }
 });
 
+/**
+ * POST /sync-opportunity
+ * Called by Airtable automation when any live fields change.
+ * Rebuilds the embed and edits the already-posted Discord message.
+ * Body: { opportunityRecordId: "recXXXX" }
+ * Header: x-post-secret: <POST_OPP_SECRET>
+ */
+app.post("/sync-opportunity", async (req, res) => {
+  try {
+    if (!requireSecret(req, res)) return;
+
+    const { opportunityRecordId } = req.body || {};
+    if (!opportunityRecordId) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "opportunityRecordId is required" });
+    }
+
+    const opp = await oppsTable.find(opportunityRecordId);
+    const fields = opp.fields || {};
+
+    const channelId = fields["Discord Public Channel ID"];
+    const messageId = fields["Discord Public Message ID"];
+
+    if (!channelId || !messageId) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Missing Discord Public Channel ID or Discord Public Message ID on opportunity",
+      });
+    }
+
+    const channel = await client.channels.fetch(String(channelId));
+    if (!channel || !channel.isTextBased()) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "Channel not found or not text-based" });
+    }
+
+    const message = await channel.messages.fetch(String(messageId));
+    if (!message) {
+      return res.status(500).json({ ok: false, error: "Message not found" });
+    }
+
+    const embed = buildOpportunityEmbed(fields);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`opp_join:${opportunityRecordId}`)
+        .setLabel("Join Bulk")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await message.edit({ embeds: [embed], components: [row] });
+
+    return res.json({ ok: true, synced: true });
+  } catch (err) {
+    console.error("sync-opportunity error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
 
-/**
- * Start bot
- */
+/* =========================
+   Start Bot
+========================= */
+
 client.login(DISCORD_TOKEN);
