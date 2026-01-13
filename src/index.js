@@ -29,6 +29,8 @@ const {
   AIRTABLE_OPPS_TABLE = "Opportunities",
   AIRTABLE_COMMITMENTS_TABLE = "Commitments",
   AIRTABLE_LINES_TABLE = "Commitment Lines",
+  AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
+
 
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
@@ -54,12 +56,14 @@ const buyersTable = base(AIRTABLE_BUYERS_TABLE);
 const oppsTable = base(AIRTABLE_OPPS_TABLE);
 const commitmentsTable = base(AIRTABLE_COMMITMENTS_TABLE);
 const linesTable = base(AIRTABLE_LINES_TABLE);
+const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 console.log("✅ Buyers table:", AIRTABLE_BUYERS_TABLE);
 console.log("✅ Opportunities table:", AIRTABLE_OPPS_TABLE);
 console.log("✅ Commitments table:", AIRTABLE_COMMITMENTS_TABLE);
 console.log("✅ Commitment Lines table:", AIRTABLE_LINES_TABLE);
+console.log("✅ Size Presets table:", AIRTABLE_SIZE_PRESETS_TABLE);
 
 /* =========================
    Field name constants
@@ -75,6 +79,7 @@ const F = {
   OPP_PRODUCT_NAME: "Product Name",
   OPP_SKU_SOFT: "SKU (Soft)",
   OPP_SKU: "SKU",
+  OPP_BRAND: "Brand",
   OPP_MIN_SIZE: "Min Size",
   OPP_MAX_SIZE: "Max Size",
   OPP_CURRENCY: "Currency",
@@ -103,6 +108,12 @@ const F = {
   LINE_COMMITMENT_RECORD_ID: "Commitment Record ID",
   LINE_SIZE: "Size",
   LINE_QTY: "Quantity",
+
+  // Size Presets
+  PRESET_BRAND: "Brand",
+  PRESET_SIZE_LADDER: "Size Ladder",
+  PRESET_LINKED_SKUS: "Linked SKU's",
+  
 };
 
 /* =========================
@@ -158,6 +169,77 @@ function parseSizeList(v) {
   const raw = asText(v);
   if (!raw) return [];
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+const ladderCache = new Map(); // key -> array of sizes
+
+function parseLadder(v) {
+  // Airtable in your screenshot uses comma-separated values
+  return asText(v)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeSku(s) {
+  return String(s || "").trim().toUpperCase();
+}
+function normalizeBrand(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+async function getPresetLadderBySku(sku) {
+  const skuKey = String(sku || "").trim().toUpperCase();
+  if (!skuKey) return [];
+
+  const rows = await sizePresetsTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `FIND('${escapeForFormula(skuKey)}', UPPER({${F.PRESET_LINKED_SKUS}} & '')) > 0`,
+    })
+    .firstPage();
+
+  if (!rows.length) return [];
+  return parseLadder(rows[0].fields[F.PRESET_SIZE_LADDER]);
+}
+
+function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
+  const min = String(minRaw || "").trim();
+  const max = String(maxRaw || "").trim();
+  if (!min && !max) return ladder;
+
+  const i1 = min ? ladder.indexOf(min) : -1;
+  const i2 = max ? ladder.indexOf(max) : -1;
+
+  if ((min && i1 === -1) || (max && i2 === -1)) return ladder;
+
+  if (min && !max) return ladder.slice(i1);
+  if (!min && max) return ladder.slice(0, i2 + 1);
+
+  const start = Math.min(i1, i2);
+  const end = Math.max(i1, i2);
+  return ladder.slice(start, end + 1);
+}
+
+async function resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields) {
+  // 1) if already filled, use it
+  const existing = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
+  if (existing.length) return existing;
+
+  // 2) build from presets by SKU
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]);
+  const ladder = await getPresetLadderBySku(sku);
+  if (!ladder.length) return [];
+
+  const sliced = sliceLadderByMinMax(ladder, oppFields[F.OPP_MIN_SIZE], oppFields[F.OPP_MAX_SIZE]);
+  if (!sliced.length) return [];
+
+  // 3) OPTIONAL writeback (fills on first Join Bulk)
+  await oppsTable.update(oppRecordId, {
+    [F.OPP_ALLOWED_SIZES]: sliced.join(", "),
+  });
+
+  return sliced;
 }
 
 function sizeKeyEncode(size) {
@@ -418,7 +500,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setDescription(await getCartLinesText(commitment.id))
         .setColor(0xffd300);
 
-      const sizes = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
+      const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
       const components =
         sizes.length > 0
           ? buildSizeButtons(opportunityRecordId, sizes)
@@ -504,7 +586,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setDescription(await getCartLinesText(commitment.id))
       .setColor(0xffd300);
 
-    const sizes = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
+    const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
     const components =
       sizes.length > 0
         ? buildSizeButtons(oppRecordId, sizes)
