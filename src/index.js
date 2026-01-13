@@ -98,8 +98,9 @@ function asText(v) {
 }
 
 function formatMoney(code, value) {
-  if (value === undefined || value === null || value === "") return "—";
-  const num = Number(value);
+  const raw = asText(value);
+  if (!raw) return "—";
+  const num = Number(raw);
   if (Number.isNaN(num)) return "—";
   const sym = currencySymbol(code);
   const formatted = num % 1 === 0 ? num.toFixed(0) : num.toFixed(2);
@@ -107,10 +108,10 @@ function formatMoney(code, value) {
 }
 
 function formatPercent(v) {
-  if (v === undefined || v === null || v === "") return "—";
-  const num = Number(v);
+  const raw = asText(v);
+  if (!raw) return "—";
+  const num = Number(raw);
   if (Number.isNaN(num)) return "—";
-  // Airtable percent fields often return 0.04 for 4%
   const pct = (num * 100).toFixed(2).replace(/\.00$/, "");
   return `${pct}%`;
 }
