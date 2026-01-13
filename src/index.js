@@ -91,6 +91,12 @@ function currencySymbol(code) {
   return c ? `${c} ` : "";
 }
 
+function asText(v) {
+  if (v === undefined || v === null) return "";
+  if (Array.isArray(v)) return v.filter(Boolean).join(", ");
+  return String(v);
+}
+
 function formatMoney(code, value) {
   if (value === undefined || value === null || value === "") return "—";
   const num = Number(value);
@@ -120,26 +126,18 @@ function getAirtableAttachmentUrl(fieldValue) {
 }
 
 function buildOpportunityEmbed(fields) {
-  const productName = fields["Product Name"] || "Bulk Opportunity";
-  const sku = fields["SKU (Soft)"] || fields["SKU"] || "—";
-  const minSize = fields["Min Size"] || "—";
-  const maxSize = fields["Max Size"] || "—";
-  const currency = fields["Currency"] || "EUR";
+  const productName = asText(fields["Product Name"]) || "Bulk Opportunity";
+  const sku = asText(fields["SKU (Soft)"]) || asText(fields["SKU"]) || "—";
+  const minSize = asText(fields["Min Size"]) || "—";
+  const maxSize = asText(fields["Max Size"]) || "—";
+  const currency = asText(fields["Currency"]) || "EUR";
+
 
   const currentPrice = formatMoney(currency, fields["Current Sell Price"]);
   const currentDiscount = formatPercent(fields["Current Discount %"]);
-  const currentTotalPairs =
-    fields["Current Total Pairs"] === undefined || fields["Current Total Pairs"] === null
-      ? "—"
-      : String(fields["Current Total Pairs"]);
-
-  const nextMinPairs =
-    fields["Next Tier Min Pairs"] === undefined || fields["Next Tier Min Pairs"] === null
-      ? "—"
-      : String(fields["Next Tier Min Pairs"]);
-
+  const currentTotalPairs = asText(fields["Current Total Pairs"]) || "—";
+  const nextMinPairs = asText(fields["Next Tier Min Pairs"]) || "—";
   const nextDiscount = formatPercent(fields["Next Tier Discount %"]);
-
   const picUrl = getAirtableAttachmentUrl(fields["Picture"]);
 
   const desc = [
