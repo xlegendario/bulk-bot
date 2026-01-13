@@ -83,6 +83,7 @@ const F = {
   OPP_NEXT_MIN_PAIRS: "Next Tier Min Pairs",
   OPP_NEXT_DISCOUNT: "Next Tier Discount %",
   OPP_PICTURE: "Picture",
+  COM_OPP_RECORD_ID: "Opportunity Record ID",
 
   // Commitments table
   COM_OPPORTUNITY: "Opportunity",
@@ -248,6 +249,7 @@ async function createCommitment({
 
   const created = await commitmentsTable.create({
     [F.COM_OPPORTUNITY]: [oppRecordId],
+    [F.COM_OPP_RECORD_ID]: oppRecordId,
     [F.COM_BUYER]: [buyerRecordId],
     [F.COM_STATUS]: "Draft",
     [F.COM_DISCORD_USER_ID]: discordId,
@@ -492,6 +494,90 @@ app.post("/sync-opportunity", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+app.post("/sync-opportunity-dms", async (req, res) => {
+  try {
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const { opportunityRecordId } = req.body || {};
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
+
+    // 1) Fetch latest opportunity fields
+    const opp = await oppsTable.find(opportunityRecordId);
+    const oppFields = opp.fields || {};
+    const oppEmbed = buildOpportunityEmbed(oppFields);
+
+    // 2) Find all commitments tied to this opportunity (via text field)
+    const rows = await commitmentsTable
+      .select({
+        filterByFormula: `AND(
+          {${F.COM_OPP_RECORD_ID}} = '${opportunityRecordId}',
+          {${F.COM_DM_CHANNEL_ID}} != '',
+          {${F.COM_DM_MESSAGE_ID}} != ''
+        )`,
+        maxRecords: 100,
+      })
+      .firstPage();
+
+    let updated = 0;
+    let failed = 0;
+
+    for (const r of rows) {
+      const dmChannelId = asText(r.fields[F.COM_DM_CHANNEL_ID]);
+      const dmMessageId = asText(r.fields[F.COM_DM_MESSAGE_ID]);
+
+      if (!dmChannelId || !dmMessageId) continue;
+
+      try {
+        const channel = await client.channels.fetch(dmChannelId);
+        if (!channel || !channel.isTextBased()) {
+          failed++;
+          continue;
+        }
+
+        const message = await channel.messages.fetch(dmMessageId);
+
+        // Keep your placeholder cart embed for now (we’ll replace later with real cart)
+        const cartEmbed = new EmbedBuilder()
+          .setTitle("🧾 Bulk Cart")
+          .setDescription(
+            [
+              "Your cart has been created.",
+              "",
+              "Next step: you’ll be able to select sizes and quantities here.",
+              "",
+              "For now this confirms the DM flow works ✅",
+            ].join("\n")
+          )
+          .setColor(0xffd300);
+
+        await message.edit({ embeds: [oppEmbed, cartEmbed] });
+
+        updated++;
+        // small delay to reduce Discord rate-limit risk
+        await sleep(300);
+      } catch (e) {
+        failed++;
+        // If user deleted DM / bot can’t access, just continue
+      }
+    }
+
+    return res.json({ ok: true, updated, failed, total: rows.length });
+  } catch (err) {
+    console.error("sync-opportunity-dms error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
 
