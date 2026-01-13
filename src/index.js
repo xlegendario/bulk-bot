@@ -134,8 +134,11 @@ function buildOpportunityEmbed(fields) {
   const currency = asText(fields["Currency"]) || "EUR";
 
 
-  const currentPrice = formatMoney(currency, fields["Current Sell Price"]);
-  const currentDiscount = formatPercent(fields["Current Discount %"]);
+  const currentPrice = formatMoney(
+    currency,
+    fields["Current Sell Price"] ?? fields["Start Sell Price"]
+  );
+  const currentDiscount = formatPercent(fields["Current Discount %"] ?? 0);
   const currentTotalPairs = asText(fields["Current Total Pairs"]) || "—";
   const nextMinPairs = asText(fields["Next Tier Min Pairs"]) || "—";
   const nextDiscount = formatPercent(fields["Next Tier Discount %"]);
@@ -144,6 +147,7 @@ function buildOpportunityEmbed(fields) {
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
+    "",
     `**Current Price:** **${currentPrice}**`,
     `**Current Discount:** **${currentDiscount}**`,
     `**Current Total Pairs:** **${currentTotalPairs}**`,
