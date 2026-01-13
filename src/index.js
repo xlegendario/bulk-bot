@@ -11,6 +11,9 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 
 /* =========================
@@ -22,19 +25,15 @@ const {
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
 
-  // Airtable tables
   AIRTABLE_BUYERS_TABLE = "Buyers",
   AIRTABLE_OPPS_TABLE = "Opportunities",
   AIRTABLE_COMMITMENTS_TABLE = "Commitments",
+  AIRTABLE_LINES_TABLE = "Commitment Lines",
 
-  // Discord channel where public opportunities are posted
   BULK_PUBLIC_CHANNEL_ID,
-
-  // Shared secret for /post-opportunity and /sync-opportunity
   POST_OPP_SECRET,
 } = process.env;
 
-// Safe port parsing for Render
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
 
 if (!DISCORD_TOKEN) {
@@ -54,22 +53,25 @@ const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const buyersTable = base(AIRTABLE_BUYERS_TABLE);
 const oppsTable = base(AIRTABLE_OPPS_TABLE);
 const commitmentsTable = base(AIRTABLE_COMMITMENTS_TABLE);
+const linesTable = base(AIRTABLE_LINES_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
-console.log("✅ Buyers table name:", AIRTABLE_BUYERS_TABLE);
-console.log("✅ Opportunities table name:", AIRTABLE_OPPS_TABLE);
-console.log("✅ Commitments table name:", AIRTABLE_COMMITMENTS_TABLE);
+console.log("✅ Buyers table:", AIRTABLE_BUYERS_TABLE);
+console.log("✅ Opportunities table:", AIRTABLE_OPPS_TABLE);
+console.log("✅ Commitments table:", AIRTABLE_COMMITMENTS_TABLE);
+console.log("✅ Commitment Lines table:", AIRTABLE_LINES_TABLE);
 
 /* =========================
-   Field name constants (edit here if your Airtable fields differ)
+   Field name constants
+   (edit here if your Airtable fields differ)
 ========================= */
 
 const F = {
-  // Buyers table
+  // Buyers
   BUYER_DISCORD_ID: "Discord User ID",
   BUYER_DISCORD_USERNAME: "Discord Username",
 
-  // Opportunities table
+  // Opportunities
   OPP_PRODUCT_NAME: "Product Name",
   OPP_SKU_SOFT: "SKU (Soft)",
   OPP_SKU: "SKU",
@@ -83,9 +85,9 @@ const F = {
   OPP_NEXT_MIN_PAIRS: "Next Tier Min Pairs",
   OPP_NEXT_DISCOUNT: "Next Tier Discount %",
   OPP_PICTURE: "Picture",
-  COM_OPP_RECORD_ID: "Opportunity Record ID",
+  OPP_ALLOWED_SIZES: "Allowed Sizes (Generated)",
 
-  // Commitments table
+  // Commitments
   COM_OPPORTUNITY: "Opportunity",
   COM_BUYER: "Buyer",
   COM_STATUS: "Status",
@@ -94,11 +96,20 @@ const F = {
   COM_DM_CHANNEL_ID: "Discord Private Channel ID",
   COM_DM_MESSAGE_ID: "Discord Summary Message ID",
   COM_LAST_ACTIVITY: "Last Activity At",
+  COM_OPP_RECORD_ID: "Opportunity Record ID", // optional, but nice
+
+  // Lines
+  LINE_COMMITMENT: "Commitment",
+  LINE_COMMITMENT_RECORD_ID: "Commitment Record ID",
+  LINE_SIZE: "Size",
+  LINE_QTY: "Quantity",
 };
 
 /* =========================
-   Helpers (formatting)
+   Helpers
 ========================= */
+
+const escapeForFormula = (str) => String(str).replace(/'/g, "\\'");
 
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
@@ -126,7 +137,7 @@ function formatMoney(code, value) {
 
 function formatPercent(v) {
   const raw = asText(v);
-  if (!raw) return "—";
+  if (raw === "") return "—";
   const num = Number(raw);
   if (Number.isNaN(num)) return "—";
   const pct = (num * 100).toFixed(2).replace(/\.00$/, "");
@@ -143,6 +154,20 @@ function getAirtableAttachmentUrl(fieldValue) {
   return null;
 }
 
+function parseSizeList(v) {
+  const raw = asText(v);
+  if (!raw) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function sizeKeyEncode(size) {
+  // Make safe for customId
+  return encodeURIComponent(size).replace(/%/g, "_");
+}
+function sizeKeyDecode(key) {
+  return decodeURIComponent(key.replace(/_/g, "%"));
+}
+
 function buildOpportunityEmbed(fields) {
   const productName = asText(fields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
   const sku = asText(fields[F.OPP_SKU_SOFT]) || asText(fields[F.OPP_SKU]) || "—";
@@ -150,7 +175,6 @@ function buildOpportunityEmbed(fields) {
   const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
 
-  // Fallback: if Current Sell Price empty, show Start Sell Price
   const currentPrice = formatMoney(
     currency,
     fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]
@@ -159,8 +183,7 @@ function buildOpportunityEmbed(fields) {
   const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
   const currentTotalPairs = asText(fields[F.OPP_CURRENT_TOTAL_PAIRS]) || "—";
   const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
-  const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]);
-
+  const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]) || "—";
   const picUrl = getAirtableAttachmentUrl(fields[F.OPP_PICTURE]);
 
   const desc = [
@@ -174,28 +197,22 @@ function buildOpportunityEmbed(fields) {
     `**Next Tier Discount:** **${nextDiscount}**`,
   ].join("\n");
 
+  const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
+
   const embed = new EmbedBuilder()
-    .setTitle(productName)
+    .setTitle(title)
     .setDescription(desc)
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
 
   if (picUrl) embed.setThumbnail(picUrl);
-
   return embed;
 }
-
-/* =========================
-   Airtable: Buyer + Commitment helpers
-========================= */
-
-const escapeForFormula = (str) => String(str).replace(/'/g, "\\'");
 
 async function upsertBuyer(discordUser) {
   const discordId = discordUser.id;
   const username = discordUser.username;
 
-  // Find by Discord ID
   const existing = await buyersTable
     .select({
       maxRecords: 1,
@@ -203,60 +220,37 @@ async function upsertBuyer(discordUser) {
     })
     .firstPage();
 
-  if (existing.length > 0) return existing[0];
+  if (existing.length) {
+    // Keep username fresh
+    try {
+      await buyersTable.update(existing[0].id, {
+        [F.BUYER_DISCORD_USERNAME]: username,
+      });
+    } catch (_) {}
+    return existing[0];
+  }
 
-  // Create minimal buyer record
   const created = await buyersTable.create({
     [F.BUYER_DISCORD_ID]: discordId,
     [F.BUYER_DISCORD_USERNAME]: username,
   });
-
   return created;
 }
 
-async function findCommitment(buyerRecordId, oppRecordId) {
-  // Best effort: find by linked Buyer + linked Opportunity
-  // This relies on Airtable formula comparing linked record IDs using RECORD_ID() not possible directly,
-  // so we use a filter on the linked fields' primary values might not be reliable.
-  // Therefore: try a robust “contains recordId” search by storing the Discord User ID too.
-  //
-  // We will filter by Discord User ID + Opportunity contains the Opportunity ID display if present.
-  // If this fails, we create a new commitment (still fine for Step 1).
-  try {
-    const opp = await oppsTable.find(oppRecordId);
-    const oppIdDisplay = asText(opp.fields["Opportunity ID"]) || "";
-
-    const formulaParts = [];
-    formulaParts.push(`{${F.COM_DISCORD_USER_ID}} = '${escapeForFormula(String(opp._rawJson?.fields?.[F.COM_DISCORD_USER_ID] || ""))}'`);
-
-    // ^ Above line is not usable (no opp field). We'll do a simpler search below using buyerRecordId in linked field value.
-    // But Airtable formula can't match linked record IDs directly. So we skip a strict search.
-  } catch (e) {
-    // ignore
-  }
-
-  // For v1 Step 1: return null so we create/overwrite safely.
-  return null;
-}
-
-async function createCommitment({
-  oppRecordId,
-  buyerRecordId,
-  discordId,
-  discordTag,
-}) {
+async function createCommitment({ oppRecordId, buyerRecordId, discordId, discordTag }) {
   const nowIso = new Date().toISOString();
-
-  const created = await commitmentsTable.create({
+  const payload = {
     [F.COM_OPPORTUNITY]: [oppRecordId],
-    [F.COM_OPP_RECORD_ID]: oppRecordId,
     [F.COM_BUYER]: [buyerRecordId],
     [F.COM_STATUS]: "Draft",
     [F.COM_DISCORD_USER_ID]: discordId,
     [F.COM_DISCORD_USER_TAG]: discordTag,
     [F.COM_LAST_ACTIVITY]: nowIso,
-  });
+  };
+  // optional helper field if you created it
+  payload[F.COM_OPP_RECORD_ID] = oppRecordId;
 
+  const created = await commitmentsTable.create(payload);
   return created;
 }
 
@@ -267,6 +261,114 @@ async function updateCommitmentDM(commitmentRecordId, dmChannelId, dmMessageId) 
     [F.COM_DM_MESSAGE_ID]: String(dmMessageId),
     [F.COM_LAST_ACTIVITY]: nowIso,
   });
+}
+
+async function findLatestCommitment(discordUserId, oppRecordId) {
+  const rows = await commitmentsTable
+    .select({
+      maxRecords: 1,
+      sort: [{ field: "Created At", direction: "desc" }],
+      filterByFormula: `AND(
+        {${F.COM_DISCORD_USER_ID}} = '${escapeForFormula(discordUserId)}',
+        {${F.COM_OPP_RECORD_ID}} = '${escapeForFormula(oppRecordId)}'
+      )`,
+    })
+    .firstPage();
+  return rows.length ? rows[0] : null;
+}
+
+async function upsertLine(commitmentRecordId, size, qty) {
+  const found = await linesTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `AND(
+        {${F.LINE_COMMITMENT_RECORD_ID}} = '${escapeForFormula(commitmentRecordId)}',
+        {${F.LINE_SIZE}} = '${escapeForFormula(size)}'
+      )`,
+    })
+    .firstPage();
+
+  if (qty <= 0) {
+    if (found.length) await linesTable.destroy(found[0].id);
+    return;
+  }
+
+  if (found.length) {
+    await linesTable.update(found[0].id, { [F.LINE_QTY]: qty });
+    return;
+  }
+
+  await linesTable.create({
+    [F.LINE_COMMITMENT]: [commitmentRecordId],
+    [F.LINE_COMMITMENT_RECORD_ID]: commitmentRecordId,
+    [F.LINE_SIZE]: size,
+    [F.LINE_QTY]: qty,
+  });
+}
+
+async function getCartLinesText(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}} = '${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  if (!rows.length) return "_No sizes selected yet._";
+
+  const items = rows
+    .map((r) => ({
+      size: asText(r.fields[F.LINE_SIZE]),
+      qty: Number(r.fields[F.LINE_QTY] || 0),
+    }))
+    .filter((x) => x.size && x.qty > 0);
+
+  if (!items.length) return "_No sizes selected yet._";
+  items.sort((a, b) => a.size.localeCompare(b.size));
+
+  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\n");
+}
+
+function buildSizeButtons(opportunityRecordId, sizes) {
+  const rows = [];
+  let row = new ActionRowBuilder();
+  let inRow = 0;
+
+  for (const s of sizes) {
+    if (rows.length === 4) break; // leave 5th row for controls
+    if (inRow === 5) {
+      rows.push(row);
+      row = new ActionRowBuilder();
+      inRow = 0;
+    }
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`size_pick:${opportunityRecordId}:${sizeKeyEncode(s)}`)
+        .setLabel(s)
+        .setStyle(ButtonStyle.Secondary)
+    );
+    inRow++;
+  }
+  if (inRow > 0 && rows.length < 4) rows.push(row);
+
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`cart_review:${opportunityRecordId}`)
+        .setLabel("Review")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`cart_submit:${opportunityRecordId}`)
+        .setLabel("Submit")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`cart_clear:${opportunityRecordId}`)
+        .setLabel("Clear")
+        .setStyle(ButtonStyle.Danger)
+    )
+  );
+
+  return rows;
 }
 
 /* =========================
@@ -283,82 +385,149 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton()) return;
-
   const inGuild = !!interaction.guildId;
   const ephemeral = inGuild;
 
-  // JOIN BULK button
-  if (interaction.customId.startsWith("opp_join:")) {
+  /* ---------- Join Bulk ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-
     await interaction.deferReply({ ephemeral });
 
     try {
-      // 1) Fetch opportunity
       const opp = await oppsTable.find(opportunityRecordId);
       const oppFields = opp.fields || {};
 
-      // 2) Upsert buyer
       const buyer = await upsertBuyer(interaction.user);
 
-      // 3) Create commitment (Draft) — for Step 1 we always create; we’ll dedupe next step
-      const commitment = await createCommitment({
-        oppRecordId: opportunityRecordId,
-        buyerRecordId: buyer.id,
-        discordId: interaction.user.id,
-        discordTag: interaction.user.tag,
-      });
+      // reuse commitment if exists, else create
+      let commitment = await findLatestCommitment(interaction.user.id, opportunityRecordId);
+      if (!commitment) {
+        commitment = await createCommitment({
+          oppRecordId: opportunityRecordId,
+          buyerRecordId: buyer.id,
+          discordId: interaction.user.id,
+          discordTag: interaction.user.tag,
+        });
+      }
 
-      // 4) DM panel
       const dm = await interaction.user.createDM();
 
+      const oppEmbed = buildOpportunityEmbed(oppFields);
       const cartEmbed = new EmbedBuilder()
         .setTitle("🧾 Bulk Cart")
-        .setDescription(
-          [
-            "Your cart has been created.",
-            "",
-            "Next step: you’ll be able to select sizes and quantities here.",
-            "",
-            "For now this confirms the DM flow works ✅",
-          ].join("\n")
-        )
+        .setDescription(await getCartLinesText(commitment.id))
         .setColor(0xffd300);
 
-      const oppEmbed = buildOpportunityEmbed(oppFields);
+      const sizes = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
+      const components =
+        sizes.length > 0
+          ? buildSizeButtons(opportunityRecordId, sizes)
+          : [];
 
       const msg = await dm.send({
         embeds: [oppEmbed, cartEmbed],
+        components: components.length ? components : undefined,
       });
 
-      // 5) Store DM message IDs on the commitment
       await updateCommitmentDM(commitment.id, dm.id, msg.id);
 
-      await interaction.editReply({
-        content: "✅ I’ve sent you a DM to build your cart.",
-      });
+      await interaction.editReply("✅ I’ve sent you a DM to build your cart.");
       return;
     } catch (err) {
       console.error("opp_join handler error:", err);
-
-      // Common case: DMs disabled
-      await interaction.editReply({
-        content:
-          "⚠️ I couldn’t DM you. Please enable DMs for this server (Privacy Settings) and try again.",
-      });
+      await interaction.editReply(
+        "⚠️ I couldn’t DM you. Please enable DMs for this server (Privacy Settings) and try again."
+      );
       return;
     }
   }
 
-  // ping test
-  if (interaction.customId === "ping_test") {
-    await interaction.reply({ content: "pong ✅", ephemeral: true });
+  /* ---------- Size button -> modal ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("size_pick:")) {
+    const [, oppRecordId, encodedSize] = interaction.customId.split(":");
+    const size = sizeKeyDecode(encodedSize);
+
+    const modal = new ModalBuilder()
+      .setCustomId(`qty_modal:${oppRecordId}:${encodedSize}`)
+      .setTitle(`Quantity for ${size}`);
+
+    const qtyInput = new TextInputBuilder()
+      .setCustomId("qty")
+      .setLabel("Quantity (0 to remove)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(qtyInput));
+    await interaction.showModal(modal);
+    return;
   }
+
+  /* ---------- Modal submit -> upsert line + update DM panel ---------- */
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("qty_modal:")) {
+    const [, oppRecordId, encodedSize] = interaction.customId.split(":");
+    const size = sizeKeyDecode(encodedSize);
+
+    const qtyRaw = interaction.fields.getTextInputValue("qty");
+    const qty = Number.parseInt(qtyRaw, 10);
+
+    if (!Number.isFinite(qty) || qty < 0 || qty > 999) {
+      await interaction.reply({ content: "⚠️ Please enter a valid quantity (0–999).", ephemeral: true });
+      return;
+    }
+
+    // Find commitment
+    let commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+    if (!commitment) {
+      const buyer = await upsertBuyer(interaction.user);
+      commitment = await createCommitment({
+        oppRecordId,
+        buyerRecordId: buyer.id,
+        discordId: interaction.user.id,
+        discordTag: interaction.user.tag,
+      });
+    }
+
+    await upsertLine(commitment.id, size, qty);
+
+    // Refresh opportunity + rebuild DM panel
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+    const oppEmbed = buildOpportunityEmbed(oppFields);
+
+    // Re-fetch commitment to read stored DM ids
+    const freshCommitment = await commitmentsTable.find(commitment.id);
+    const dmChannelId = asText(freshCommitment.fields[F.COM_DM_CHANNEL_ID]);
+    const dmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
+
+    const cartEmbed = new EmbedBuilder()
+      .setTitle("🧾 Bulk Cart")
+      .setDescription(await getCartLinesText(commitment.id))
+      .setColor(0xffd300);
+
+    const sizes = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
+    const components =
+      sizes.length > 0
+        ? buildSizeButtons(oppRecordId, sizes)
+        : [];
+
+    if (dmChannelId && dmMessageId) {
+      const ch = await client.channels.fetch(dmChannelId);
+      const msg = await ch.messages.fetch(dmMessageId);
+      await msg.edit({
+        embeds: [oppEmbed, cartEmbed],
+        components: components.length ? components : [],
+      });
+    }
+
+    await interaction.reply({ content: `✅ Saved: **${size} × ${qty}**`, ephemeral: true });
+    return;
+  }
+
+  // placeholders for next step (Review/Submit/Clear)
 });
 
 /* =========================
-   Express (existing posting + syncing)
+   Express (post + sync embeds)
 ========================= */
 
 const app = express();
@@ -399,16 +568,10 @@ app.post("/post-opportunity", async (req, res) => {
     const fields = opp.fields || {};
 
     if (fields["Discord Public Message ID"]) {
-      return res.json({
-        ok: true,
-        skipped: true,
-        reason: "Already posted",
-        messageId: fields["Discord Public Message ID"],
-      });
+      return res.json({ ok: true, skipped: true, reason: "Already posted", messageId: fields["Discord Public Message ID"] });
     }
 
     const embed = buildOpportunityEmbed(fields);
-
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`opp_join:${opportunityRecordId}`)
@@ -428,13 +591,11 @@ app.post("/post-opportunity", async (req, res) => {
       "Discord Public Message ID": String(msg.id),
       "Post Now": false,
     };
-
     if (fields["Posted At"] !== undefined) {
       updatePayload["Posted At"] = new Date().toISOString();
     }
 
     await oppsTable.update(opportunityRecordId, updatePayload);
-
     return res.json({ ok: true, posted: true, messageId: msg.id });
   } catch (err) {
     console.error("post-opportunity error:", err);
@@ -461,10 +622,7 @@ app.post("/sync-opportunity", async (req, res) => {
     const messageId = fields["Discord Public Message ID"];
 
     if (!channelId || !messageId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing Discord Public Channel ID or Discord Public Message ID",
-      });
+      return res.status(400).json({ ok: false, error: "Missing Discord Public Channel ID or Discord Public Message ID" });
     }
 
     const channel = await client.channels.fetch(String(channelId));
@@ -473,10 +631,6 @@ app.post("/sync-opportunity", async (req, res) => {
     }
 
     const message = await channel.messages.fetch(String(messageId));
-    if (!message) {
-      return res.status(500).json({ ok: false, error: "Message not found" });
-    }
-
     const embed = buildOpportunityEmbed(fields);
 
     const row = new ActionRowBuilder().addComponents(
@@ -487,7 +641,6 @@ app.post("/sync-opportunity", async (req, res) => {
     );
 
     await message.edit({ embeds: [embed], components: [row] });
-
     return res.json({ ok: true, synced: true });
   } catch (err) {
     console.error("sync-opportunity error:", err);
@@ -495,94 +648,6 @@ app.post("/sync-opportunity", async (req, res) => {
   }
 });
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-app.post("/sync-opportunity-dms", async (req, res) => {
-  try {
-    const incomingSecret = req.header("x-post-secret") || "";
-    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
-      return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
-
-    const { opportunityRecordId } = req.body || {};
-    if (!opportunityRecordId) {
-      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
-    }
-
-    // 1) Fetch latest opportunity fields
-    const opp = await oppsTable.find(opportunityRecordId);
-    const oppFields = opp.fields || {};
-    const oppEmbed = buildOpportunityEmbed(oppFields);
-
-    // 2) Find all commitments tied to this opportunity (via text field)
-    const rows = await commitmentsTable
-      .select({
-        filterByFormula: `AND(
-          {${F.COM_OPP_RECORD_ID}} = '${opportunityRecordId}',
-          {${F.COM_DM_CHANNEL_ID}} != '',
-          {${F.COM_DM_MESSAGE_ID}} != ''
-        )`,
-        maxRecords: 100,
-      })
-      .firstPage();
-
-    let updated = 0;
-    let failed = 0;
-
-    for (const r of rows) {
-      const dmChannelId = asText(r.fields[F.COM_DM_CHANNEL_ID]);
-      const dmMessageId = asText(r.fields[F.COM_DM_MESSAGE_ID]);
-
-      if (!dmChannelId || !dmMessageId) continue;
-
-      try {
-        const channel = await client.channels.fetch(dmChannelId);
-        if (!channel || !channel.isTextBased()) {
-          failed++;
-          continue;
-        }
-
-        const message = await channel.messages.fetch(dmMessageId);
-
-        // Keep your placeholder cart embed for now (we’ll replace later with real cart)
-        const cartEmbed = new EmbedBuilder()
-          .setTitle("🧾 Bulk Cart")
-          .setDescription(
-            [
-              "Your cart has been created.",
-              "",
-              "Next step: you’ll be able to select sizes and quantities here.",
-              "",
-              "For now this confirms the DM flow works ✅",
-            ].join("\n")
-          )
-          .setColor(0xffd300);
-
-        await message.edit({ embeds: [oppEmbed, cartEmbed] });
-
-        updated++;
-        // small delay to reduce Discord rate-limit risk
-        await sleep(300);
-      } catch (e) {
-        failed++;
-        // If user deleted DM / bot can’t access, just continue
-      }
-    }
-
-    return res.json({ ok: true, updated, failed, total: rows.length });
-  } catch (err) {
-    console.error("sync-opportunity-dms error:", err);
-    return res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
-
-/* =========================
-   Start Bot
-========================= */
 
 client.login(DISCORD_TOKEN);
