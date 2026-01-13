@@ -132,43 +132,43 @@ function buildOpportunityEmbed(fields) {
 
   const currentPrice = formatMoney(currency, fields["Current Sell Price"]);
   const currentDiscount = formatPercent(fields["Current Discount %"]);
-  const currentTotalPairs = fields["Current Total Pairs"] ?? "—";
-  const nextMinPairs = fields["Next Tier Min Pairs"] ?? "—";
+  const currentTotalPairs =
+    fields["Current Total Pairs"] === undefined || fields["Current Total Pairs"] === null
+      ? "—"
+      : String(fields["Current Total Pairs"]);
+
+  const nextMinPairs =
+    fields["Next Tier Min Pairs"] === undefined || fields["Next Tier Min Pairs"] === null
+      ? "—"
+      : String(fields["Next Tier Min Pairs"]);
+
   const nextDiscount = formatPercent(fields["Next Tier Discount %"]);
 
   const picUrl = getAirtableAttachmentUrl(fields["Picture"]);
 
+  const desc = [
+    `**SKU:** \`${sku}\``,
+    `**Size Range:** \`${minSize} → ${maxSize}\``,
+    `**Current Price:** **${currentPrice}**`,
+    `**Current Discount:** **${currentDiscount}**`,
+    `**Current Total Pairs:** **${currentTotalPairs}**`,
+    "",
+    `**MOQ for Next Tier:** **${nextMinPairs}**`,
+    `**Next Tier Discount:** **${nextDiscount}**`,
+  ].join("\n");
+
   const embed = new EmbedBuilder()
-    .setTitle(`📦 ${productName}`)
-    .addFields(
-      { name: "SKU", value: `\`${sku}\``, inline: true },
-      { name: "Size Range", value: `EU ${minSize} → ${maxSize}`, inline: true },
-
-      { name: "Current Price", value: `**${currentPrice}**`, inline: true },
-      { name: "Current Discount", value: `**${currentDiscount}**`, inline: true },
-
-      { name: "Current Total Pairs", value: `**${currentTotalPairs}**`, inline: true },
-      { name: "MOQ for next discount", value: `**${nextMinPairs}**`, inline: true },
-
-      { name: "Next Tier Discount", value: `**${nextDiscount}**`, inline: true }
-    )
+    .setTitle(productName)
+    .setDescription(desc)
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
 
-  // Add picture as big image (recommended for product)
-  if (picUrl) embed.setImage(picUrl);
+  // Small image top-right
+  if (picUrl) embed.setThumbnail(picUrl);
 
   return embed;
 }
 
-function requireSecret(req, res) {
-  const incomingSecret = req.header("x-post-secret") || "";
-  if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
-    res.status(401).json({ ok: false, error: "Unauthorized" });
-    return false;
-  }
-  return true;
-}
 
 /* =========================
    Express
