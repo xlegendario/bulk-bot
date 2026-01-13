@@ -25,6 +25,7 @@ const {
   // Airtable tables
   AIRTABLE_BUYERS_TABLE = "Buyers",
   AIRTABLE_OPPS_TABLE = "Opportunities",
+  AIRTABLE_COMMITMENTS_TABLE = "Commitments",
 
   // Discord channel where public opportunities are posted
   BULK_PUBLIC_CHANNEL_ID,
@@ -52,35 +53,50 @@ if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const buyersTable = base(AIRTABLE_BUYERS_TABLE);
 const oppsTable = base(AIRTABLE_OPPS_TABLE);
+const commitmentsTable = base(AIRTABLE_COMMITMENTS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 console.log("✅ Buyers table name:", AIRTABLE_BUYERS_TABLE);
 console.log("✅ Opportunities table name:", AIRTABLE_OPPS_TABLE);
+console.log("✅ Commitments table name:", AIRTABLE_COMMITMENTS_TABLE);
 
 /* =========================
-   Discord Client
+   Field name constants (edit here if your Airtable fields differ)
 ========================= */
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-  partials: [Partials.Channel],
-});
+const F = {
+  // Buyers table
+  BUYER_DISCORD_ID: "Discord User ID",
+  BUYER_DISCORD_USERNAME: "Discord Username",
 
-client.once(Events.ClientReady, async (c) => {
-  console.log(`🤖 Logged in as ${c.user.tag}`);
-});
+  // Opportunities table
+  OPP_PRODUCT_NAME: "Product Name",
+  OPP_SKU_SOFT: "SKU (Soft)",
+  OPP_SKU: "SKU",
+  OPP_MIN_SIZE: "Min Size",
+  OPP_MAX_SIZE: "Max Size",
+  OPP_CURRENCY: "Currency",
+  OPP_CURRENT_SELL_PRICE: "Current Sell Price",
+  OPP_START_SELL_PRICE: "Start Sell Price",
+  OPP_CURRENT_DISCOUNT: "Current Discount %",
+  OPP_CURRENT_TOTAL_PAIRS: "Current Total Pairs",
+  OPP_NEXT_MIN_PAIRS: "Next Tier Min Pairs",
+  OPP_NEXT_DISCOUNT: "Next Tier Discount %",
+  OPP_PICTURE: "Picture",
 
-// We'll add Join Bulk handler next step
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton()) return;
-
-  if (interaction.customId === "ping_test") {
-    await interaction.reply({ content: "pong ✅", ephemeral: true });
-  }
-});
+  // Commitments table
+  COM_OPPORTUNITY: "Opportunity",
+  COM_BUYER: "Buyer",
+  COM_STATUS: "Status",
+  COM_DISCORD_USER_ID: "Discord User ID",
+  COM_DISCORD_USER_TAG: "Discord User Tag",
+  COM_DM_CHANNEL_ID: "Discord Private Channel ID",
+  COM_DM_MESSAGE_ID: "Discord Summary Message ID",
+  COM_LAST_ACTIVITY: "Last Activity At",
+};
 
 /* =========================
-   Helpers
+   Helpers (formatting)
 ========================= */
 
 function currencySymbol(code) {
@@ -127,27 +143,28 @@ function getAirtableAttachmentUrl(fieldValue) {
 }
 
 function buildOpportunityEmbed(fields) {
-  const productName = asText(fields["Product Name"]) || "Bulk Opportunity";
-  const sku = asText(fields["SKU (Soft)"]) || asText(fields["SKU"]) || "—";
-  const minSize = asText(fields["Min Size"]) || "—";
-  const maxSize = asText(fields["Max Size"]) || "—";
-  const currency = asText(fields["Currency"]) || "EUR";
+  const productName = asText(fields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(fields[F.OPP_SKU_SOFT]) || asText(fields[F.OPP_SKU]) || "—";
+  const minSize = asText(fields[F.OPP_MIN_SIZE]) || "—";
+  const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
+  const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
 
-
+  // Fallback: if Current Sell Price empty, show Start Sell Price
   const currentPrice = formatMoney(
     currency,
-    fields["Current Sell Price"] ?? fields["Start Sell Price"]
+    fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]
   );
-  const currentDiscount = formatPercent(fields["Current Discount %"] ?? 0);
-  const currentTotalPairs = asText(fields["Current Total Pairs"]) || "—";
-  const nextMinPairs = asText(fields["Next Tier Min Pairs"]) || "—";
-  const nextDiscount = formatPercent(fields["Next Tier Discount %"]);
-  const picUrl = getAirtableAttachmentUrl(fields["Picture"]);
+
+  const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
+  const currentTotalPairs = asText(fields[F.OPP_CURRENT_TOTAL_PAIRS]) || "—";
+  const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
+  const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]);
+
+  const picUrl = getAirtableAttachmentUrl(fields[F.OPP_PICTURE]);
 
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
-    "",
     `**Current Price:** **${currentPrice}**`,
     `**Current Discount:** **${currentDiscount}**`,
     `**Current Total Pairs:** **${currentTotalPairs}**`,
@@ -162,14 +179,184 @@ function buildOpportunityEmbed(fields) {
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
 
-  // Small image in top-right corner
   if (picUrl) embed.setThumbnail(picUrl);
 
   return embed;
 }
 
 /* =========================
-   Express
+   Airtable: Buyer + Commitment helpers
+========================= */
+
+const escapeForFormula = (str) => String(str).replace(/'/g, "\\'");
+
+async function upsertBuyer(discordUser) {
+  const discordId = discordUser.id;
+  const username = discordUser.username;
+
+  // Find by Discord ID
+  const existing = await buyersTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `{${F.BUYER_DISCORD_ID}} = '${escapeForFormula(discordId)}'`,
+    })
+    .firstPage();
+
+  if (existing.length > 0) return existing[0];
+
+  // Create minimal buyer record
+  const created = await buyersTable.create({
+    [F.BUYER_DISCORD_ID]: discordId,
+    [F.BUYER_DISCORD_USERNAME]: username,
+  });
+
+  return created;
+}
+
+async function findCommitment(buyerRecordId, oppRecordId) {
+  // Best effort: find by linked Buyer + linked Opportunity
+  // This relies on Airtable formula comparing linked record IDs using RECORD_ID() not possible directly,
+  // so we use a filter on the linked fields' primary values might not be reliable.
+  // Therefore: try a robust “contains recordId” search by storing the Discord User ID too.
+  //
+  // We will filter by Discord User ID + Opportunity contains the Opportunity ID display if present.
+  // If this fails, we create a new commitment (still fine for Step 1).
+  try {
+    const opp = await oppsTable.find(oppRecordId);
+    const oppIdDisplay = asText(opp.fields["Opportunity ID"]) || "";
+
+    const formulaParts = [];
+    formulaParts.push(`{${F.COM_DISCORD_USER_ID}} = '${escapeForFormula(String(opp._rawJson?.fields?.[F.COM_DISCORD_USER_ID] || ""))}'`);
+
+    // ^ Above line is not usable (no opp field). We'll do a simpler search below using buyerRecordId in linked field value.
+    // But Airtable formula can't match linked record IDs directly. So we skip a strict search.
+  } catch (e) {
+    // ignore
+  }
+
+  // For v1 Step 1: return null so we create/overwrite safely.
+  return null;
+}
+
+async function createCommitment({
+  oppRecordId,
+  buyerRecordId,
+  discordId,
+  discordTag,
+}) {
+  const nowIso = new Date().toISOString();
+
+  const created = await commitmentsTable.create({
+    [F.COM_OPPORTUNITY]: [oppRecordId],
+    [F.COM_BUYER]: [buyerRecordId],
+    [F.COM_STATUS]: "Draft",
+    [F.COM_DISCORD_USER_ID]: discordId,
+    [F.COM_DISCORD_USER_TAG]: discordTag,
+    [F.COM_LAST_ACTIVITY]: nowIso,
+  });
+
+  return created;
+}
+
+async function updateCommitmentDM(commitmentRecordId, dmChannelId, dmMessageId) {
+  const nowIso = new Date().toISOString();
+  await commitmentsTable.update(commitmentRecordId, {
+    [F.COM_DM_CHANNEL_ID]: String(dmChannelId),
+    [F.COM_DM_MESSAGE_ID]: String(dmMessageId),
+    [F.COM_LAST_ACTIVITY]: nowIso,
+  });
+}
+
+/* =========================
+   Discord Client
+========================= */
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  partials: [Partials.Channel],
+});
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`🤖 Logged in as ${c.user.tag}`);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isButton()) return;
+
+  const inGuild = !!interaction.guildId;
+  const ephemeral = inGuild;
+
+  // JOIN BULK button
+  if (interaction.customId.startsWith("opp_join:")) {
+    const opportunityRecordId = interaction.customId.split("opp_join:")[1];
+
+    await interaction.deferReply({ ephemeral });
+
+    try {
+      // 1) Fetch opportunity
+      const opp = await oppsTable.find(opportunityRecordId);
+      const oppFields = opp.fields || {};
+
+      // 2) Upsert buyer
+      const buyer = await upsertBuyer(interaction.user);
+
+      // 3) Create commitment (Draft) — for Step 1 we always create; we’ll dedupe next step
+      const commitment = await createCommitment({
+        oppRecordId: opportunityRecordId,
+        buyerRecordId: buyer.id,
+        discordId: interaction.user.id,
+        discordTag: interaction.user.tag,
+      });
+
+      // 4) DM panel
+      const dm = await interaction.user.createDM();
+
+      const cartEmbed = new EmbedBuilder()
+        .setTitle("🧾 Bulk Cart")
+        .setDescription(
+          [
+            "Your cart has been created.",
+            "",
+            "Next step: you’ll be able to select sizes and quantities here.",
+            "",
+            "For now this confirms the DM flow works ✅",
+          ].join("\n")
+        )
+        .setColor(0xffd300);
+
+      const oppEmbed = buildOpportunityEmbed(oppFields);
+
+      const msg = await dm.send({
+        embeds: [oppEmbed, cartEmbed],
+      });
+
+      // 5) Store DM message IDs on the commitment
+      await updateCommitmentDM(commitment.id, dm.id, msg.id);
+
+      await interaction.editReply({
+        content: "✅ I’ve sent you a DM to build your cart.",
+      });
+      return;
+    } catch (err) {
+      console.error("opp_join handler error:", err);
+
+      // Common case: DMs disabled
+      await interaction.editReply({
+        content:
+          "⚠️ I couldn’t DM you. Please enable DMs for this server (Privacy Settings) and try again.",
+      });
+      return;
+    }
+  }
+
+  // ping test
+  if (interaction.customId === "ping_test") {
+    await interaction.reply({ content: "pong ✅", ephemeral: true });
+  }
+});
+
+/* =========================
+   Express (existing posting + syncing)
 ========================= */
 
 const app = express();
@@ -190,11 +377,6 @@ app.get("/airtable-test", async (req, res) => {
   }
 });
 
-/**
- * POST /post-opportunity
- * Body: { opportunityRecordId: "recXXXX" }
- * Header: x-post-secret: <POST_OPP_SECRET>
- */
 app.post("/post-opportunity", async (req, res) => {
   try {
     const incomingSecret = req.header("x-post-secret") || "";
@@ -214,7 +396,6 @@ app.post("/post-opportunity", async (req, res) => {
     const opp = await oppsTable.find(opportunityRecordId);
     const fields = opp.fields || {};
 
-    // Prevent double posting
     if (fields["Discord Public Message ID"]) {
       return res.json({
         ok: true,
@@ -240,7 +421,6 @@ app.post("/post-opportunity", async (req, res) => {
 
     const msg = await channel.send({ embeds: [embed], components: [row] });
 
-    // Write back to Airtable
     const updatePayload = {
       "Discord Public Channel ID": String(BULK_PUBLIC_CHANNEL_ID),
       "Discord Public Message ID": String(msg.id),
@@ -260,11 +440,6 @@ app.post("/post-opportunity", async (req, res) => {
   }
 });
 
-/**
- * POST /sync-opportunity
- * Body: { opportunityRecordId: "recXXXX" }
- * Header: x-post-secret: <POST_OPP_SECRET>
- */
 app.post("/sync-opportunity", async (req, res) => {
   try {
     const incomingSecret = req.header("x-post-secret") || "";
