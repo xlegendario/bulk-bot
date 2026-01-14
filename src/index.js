@@ -532,14 +532,19 @@ async function recalcOpportunityPricing(oppRecordId, totalPairs) {
       return;
     }
 
-    // Current tier = highest tier with minPairs <= totalPairs
+    // If totalPairs is 0 (no commitments yet), we still want a meaningful "next tier".
+    // Most rule sets have a baseline tier at Min Pairs = 1 with 0% discount.
+    // Using effectivePairs=1 ensures Next Tier becomes the first real discount step (e.g. 25), not "—".
+    const effectivePairs = Math.max(Number(totalPairs || 0), 1);
+
+    // Current tier = highest tier with minPairs <= effectivePairs
     let current = tiers[0];
     for (const t of tiers) {
-      if (totalPairs >= t.minPairs) current = t;
+      if (effectivePairs >= t.minPairs) current = t;
       else break;
     }
 
-    const next = tiers.find((t) => t.minPairs > totalPairs) || null;
+    const next = tiers.find((t) => t.minPairs > effectivePairs) || null;
 
     let currentSellPrice = null;
     if (Number.isFinite(startPrice)) {
@@ -1068,8 +1073,15 @@ app.post("/post-opportunity", async (req, res) => {
       return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
-    const opp = await oppsTable.find(opportunityRecordId);
-    const fields = opp.fields || {};
+    let opp = await oppsTable.find(opportunityRecordId);
+    let fields = opp.fields || {};
+
+    // Ensure tier fields are populated even before any buyer commits
+    const totalPairs0 = Number(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0) || 0;
+    await recalcOpportunityPricing(opportunityRecordId, totalPairs0);
+    // re-fetch so the embed uses updated fields
+    opp = await oppsTable.find(opportunityRecordId);
+    fields = opp.fields || {};
 
     if (fields["Discord Public Message ID"]) {
       return res.json({
@@ -1119,8 +1131,15 @@ app.post("/sync-opportunity", async (req, res) => {
       return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
-    const opp = await oppsTable.find(opportunityRecordId);
-    const fields = opp.fields || {};
+    let opp = await oppsTable.find(opportunityRecordId);
+    let fields = opp.fields || {};
+
+    // Ensure tier fields are populated even before any buyer commits
+    const totalPairs0 = Number(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0) || 0;
+    await recalcOpportunityPricing(opportunityRecordId, totalPairs0);
+    // re-fetch so the embed uses updated fields
+    opp = await oppsTable.find(opportunityRecordId);
+    fields = opp.fields || {};
 
     const channelId = fields["Discord Public Channel ID"];
     const messageId = fields["Discord Public Message ID"];
