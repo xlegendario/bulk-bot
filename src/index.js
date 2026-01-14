@@ -285,6 +285,7 @@ function buildOpportunityEmbed(fields) {
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
+    "",
     `**Current Price:** **${currentPrice}**`,
     `**Current Discount:** **${currentDiscount}**`,
     `**Current Total Pairs:** **${currentTotalPairs}**`,
