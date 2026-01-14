@@ -31,7 +31,6 @@ const {
   AIRTABLE_LINES_TABLE = "Commitment Lines",
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
 
-
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
 } = process.env;
@@ -79,7 +78,6 @@ const F = {
   OPP_PRODUCT_NAME: "Product Name",
   OPP_SKU_SOFT: "SKU (Soft)",
   OPP_SKU: "SKU",
-  OPP_BRAND: "Brand",
   OPP_MIN_SIZE: "Min Size",
   OPP_MAX_SIZE: "Max Size",
   OPP_CURRENCY: "Currency",
@@ -101,7 +99,8 @@ const F = {
   COM_DM_CHANNEL_ID: "Discord Private Channel ID",
   COM_DM_MESSAGE_ID: "Discord Summary Message ID",
   COM_LAST_ACTIVITY: "Last Activity At",
-  COM_OPP_RECORD_ID: "Opportunity Record ID", // optional, but nice
+  COM_OPP_RECORD_ID: "Opportunity Record ID", // optional helper field
+  COM_SUBMITTED_AT: "Submitted At",
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -110,10 +109,8 @@ const F = {
   LINE_QTY: "Quantity",
 
   // Size Presets
-  PRESET_BRAND: "Brand",
   PRESET_SIZE_LADDER: "Size Ladder",
   PRESET_LINKED_SKUS: "Linked SKU's",
-  
 };
 
 /* =========================
@@ -171,21 +168,30 @@ function parseSizeList(v) {
   return raw.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
-const ladderCache = new Map(); // key -> array of sizes
-
 function parseLadder(v) {
-  // Airtable in your screenshot uses comma-separated values
   return asText(v)
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-function normalizeSku(s) {
-  return String(s || "").trim().toUpperCase();
-}
-function normalizeBrand(s) {
-  return String(s || "").trim().toLowerCase();
+function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
+  const min = String(minRaw || "").trim();
+  const max = String(maxRaw || "").trim();
+  if (!min && !max) return ladder;
+
+  const i1 = min ? ladder.indexOf(min) : -1;
+  const i2 = max ? ladder.indexOf(max) : -1;
+
+  // if min/max not found in ladder, just return full ladder (better than no buttons)
+  if ((min && i1 === -1) || (max && i2 === -1)) return ladder;
+
+  if (min && !max) return ladder.slice(i1);
+  if (!min && max) return ladder.slice(0, i2 + 1);
+
+  const start = Math.min(i1, i2);
+  const end = Math.max(i1, i2);
+  return ladder.slice(start, end + 1);
 }
 
 async function getPresetLadderBySku(sku) {
@@ -203,30 +209,11 @@ async function getPresetLadderBySku(sku) {
   return parseLadder(rows[0].fields[F.PRESET_SIZE_LADDER]);
 }
 
-function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
-  const min = String(minRaw || "").trim();
-  const max = String(maxRaw || "").trim();
-  if (!min && !max) return ladder;
-
-  const i1 = min ? ladder.indexOf(min) : -1;
-  const i2 = max ? ladder.indexOf(max) : -1;
-
-  if ((min && i1 === -1) || (max && i2 === -1)) return ladder;
-
-  if (min && !max) return ladder.slice(i1);
-  if (!min && max) return ladder.slice(0, i2 + 1);
-
-  const start = Math.min(i1, i2);
-  const end = Math.max(i1, i2);
-  return ladder.slice(start, end + 1);
-}
-
+// Option B: compute allowed sizes + write back to Opportunity the first time
 async function resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields) {
-  // 1) if already filled, use it
   const existing = parseSizeList(oppFields[F.OPP_ALLOWED_SIZES]);
   if (existing.length) return existing;
 
-  // 2) build from presets by SKU
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]);
   const ladder = await getPresetLadderBySku(sku);
   if (!ladder.length) return [];
@@ -234,7 +221,7 @@ async function resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields) {
   const sliced = sliceLadderByMinMax(ladder, oppFields[F.OPP_MIN_SIZE], oppFields[F.OPP_MAX_SIZE]);
   if (!sliced.length) return [];
 
-  // 3) OPTIONAL writeback (fills on first Join Bulk)
+  // Writeback (only when empty)
   await oppsTable.update(oppRecordId, {
     [F.OPP_ALLOWED_SIZES]: sliced.join(", "),
   });
@@ -243,7 +230,6 @@ async function resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields) {
 }
 
 function sizeKeyEncode(size) {
-  // Make safe for customId
   return encodeURIComponent(size).replace(/%/g, "_");
 }
 function sizeKeyDecode(key) {
@@ -303,20 +289,16 @@ async function upsertBuyer(discordUser) {
     .firstPage();
 
   if (existing.length) {
-    // Keep username fresh
     try {
-      await buyersTable.update(existing[0].id, {
-        [F.BUYER_DISCORD_USERNAME]: username,
-      });
+      await buyersTable.update(existing[0].id, { [F.BUYER_DISCORD_USERNAME]: username });
     } catch (_) {}
     return existing[0];
   }
 
-  const created = await buyersTable.create({
+  return await buyersTable.create({
     [F.BUYER_DISCORD_ID]: discordId,
     [F.BUYER_DISCORD_USERNAME]: username,
   });
-  return created;
 }
 
 async function createCommitment({ oppRecordId, buyerRecordId, discordId, discordTag }) {
@@ -328,20 +310,23 @@ async function createCommitment({ oppRecordId, buyerRecordId, discordId, discord
     [F.COM_DISCORD_USER_ID]: discordId,
     [F.COM_DISCORD_USER_TAG]: discordTag,
     [F.COM_LAST_ACTIVITY]: nowIso,
+    [F.COM_OPP_RECORD_ID]: oppRecordId,
   };
-  // optional helper field if you created it
-  payload[F.COM_OPP_RECORD_ID] = oppRecordId;
-
-  const created = await commitmentsTable.create(payload);
-  return created;
+  return await commitmentsTable.create(payload);
 }
 
 async function updateCommitmentDM(commitmentRecordId, dmChannelId, dmMessageId) {
-  const nowIso = new Date().toISOString();
   await commitmentsTable.update(commitmentRecordId, {
     [F.COM_DM_CHANNEL_ID]: String(dmChannelId),
     [F.COM_DM_MESSAGE_ID]: String(dmMessageId),
-    [F.COM_LAST_ACTIVITY]: nowIso,
+    [F.COM_LAST_ACTIVITY]: new Date().toISOString(),
+  });
+}
+
+async function touchCommitment(commitmentRecordId, patch = {}) {
+  await commitmentsTable.update(commitmentRecordId, {
+    [F.COM_LAST_ACTIVITY]: new Date().toISOString(),
+    ...patch,
   });
 }
 
@@ -411,7 +396,26 @@ async function getCartLinesText(commitmentRecordId) {
   return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\n");
 }
 
-function buildSizeButtons(opportunityRecordId, sizes) {
+async function deleteAllLines(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}} = '${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  if (!rows.length) return;
+
+  const ids = rows.map((r) => r.id);
+  const chunkSize = 10;
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    await linesTable.destroy(ids.slice(i, i + chunkSize));
+  }
+}
+
+function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
+  const { locked = false } = opts;
+
   const rows = [];
   let row = new ActionRowBuilder();
   let inRow = 0;
@@ -423,11 +427,13 @@ function buildSizeButtons(opportunityRecordId, sizes) {
       row = new ActionRowBuilder();
       inRow = 0;
     }
+
     row.addComponents(
       new ButtonBuilder()
         .setCustomId(`size_pick:${opportunityRecordId}:${sizeKeyEncode(s)}`)
         .setLabel(s)
         .setStyle(ButtonStyle.Secondary)
+        .setDisabled(locked)
     );
     inRow++;
   }
@@ -439,18 +445,54 @@ function buildSizeButtons(opportunityRecordId, sizes) {
         .setCustomId(`cart_review:${opportunityRecordId}`)
         .setLabel("Review")
         .setStyle(ButtonStyle.Primary),
+
       new ButtonBuilder()
         .setCustomId(`cart_submit:${opportunityRecordId}`)
         .setLabel("Submit")
-        .setStyle(ButtonStyle.Success),
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(locked),
+
       new ButtonBuilder()
         .setCustomId(`cart_clear:${opportunityRecordId}`)
         .setLabel("Clear")
         .setStyle(ButtonStyle.Danger)
+        .setDisabled(locked)
     )
   );
 
   return rows;
+}
+
+// Single source of truth for DM panel updates
+async function refreshDmPanel(oppRecordId, commitmentRecordId) {
+  const opp = await oppsTable.find(oppRecordId);
+  const oppFields = opp.fields || {};
+
+  const oppEmbed = buildOpportunityEmbed(oppFields);
+
+  const freshCommitment = await commitmentsTable.find(commitmentRecordId);
+  const dmChannelId = asText(freshCommitment.fields[F.COM_DM_CHANNEL_ID]);
+  const dmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
+  const status = asText(freshCommitment.fields[F.COM_STATUS]) || "Draft";
+
+  const cartEmbed = new EmbedBuilder()
+    .setTitle("🧾 Bulk Cart")
+    .setDescription((await getCartLinesText(commitmentRecordId)) + `\n\n**Status:** **${status}**`)
+    .setColor(0xffd300);
+
+  const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
+  const locked = status === "Submitted";
+
+  const components = sizes.length ? buildSizeButtons(oppRecordId, sizes, { locked }) : [];
+
+  if (dmChannelId && dmMessageId) {
+    const ch = await client.channels.fetch(dmChannelId);
+    const msg = await ch.messages.fetch(dmMessageId);
+    await msg.edit({
+      embeds: [oppEmbed, cartEmbed],
+      components: components.length ? components : [],
+    });
+  }
 }
 
 /* =========================
@@ -468,12 +510,11 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
-  const ephemeral = inGuild;
 
-  /* ---------- Join Bulk ---------- */
+  /* ---------- Join Bulk (from public channel) ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-    await interaction.deferReply({ ephemeral });
+    await interaction.deferReply({ ephemeral: inGuild });
 
     try {
       const opp = await oppsTable.find(opportunityRecordId);
@@ -492,24 +533,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
+      const freshCommitment = await commitmentsTable.find(commitment.id);
+      const status = asText(freshCommitment.fields[F.COM_STATUS]) || "Draft";
+      const locked = status === "Submitted";
+      const storedDmChannelId = asText(freshCommitment.fields[F.COM_DM_CHANNEL_ID]);
+      const storedDmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
+
       const dm = await interaction.user.createDM();
 
       const oppEmbed = buildOpportunityEmbed(oppFields);
       const cartEmbed = new EmbedBuilder()
         .setTitle("🧾 Bulk Cart")
-        .setDescription(await getCartLinesText(commitment.id))
+        .setDescription((await getCartLinesText(commitment.id)) + `\n\n**Status:** **${status}**`)
         .setColor(0xffd300);
 
       const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
-      const components =
-        sizes.length > 0
-          ? buildSizeButtons(opportunityRecordId, sizes)
-          : [];
+      const components = sizes.length ? buildSizeButtons(opportunityRecordId, sizes, { locked }) : [];
 
-      const msg = await dm.send({
-        embeds: [oppEmbed, cartEmbed],
-        components: components.length ? components : undefined,
-      });
+      // Update existing panel if we have ids, otherwise send new
+      let msg;
+      if (storedDmChannelId && storedDmMessageId) {
+        try {
+          const ch = await client.channels.fetch(storedDmChannelId);
+          msg = await ch.messages.fetch(storedDmMessageId);
+          await msg.edit({
+            embeds: [oppEmbed, cartEmbed],
+            components: components.length ? components : [],
+          });
+        } catch (_) {
+          msg = await dm.send({
+            embeds: [oppEmbed, cartEmbed],
+            components: components.length ? components : undefined,
+          });
+        }
+      } else {
+        msg = await dm.send({
+          embeds: [oppEmbed, cartEmbed],
+          components: components.length ? components : undefined,
+        });
+      }
 
       await updateCommitmentDM(commitment.id, dm.id, msg.id);
 
@@ -529,6 +591,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const [, oppRecordId, encodedSize] = interaction.customId.split(":");
     const size = sizeKeyDecode(encodedSize);
 
+    const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+    if (commitment) {
+      const fresh = await commitmentsTable.find(commitment.id);
+      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
+      if (status === "Submitted") {
+        await interaction.reply({ content: "⚠️ This commitment is already submitted and can’t be edited." });
+        return;
+      }
+    }
+
     const modal = new ModalBuilder()
       .setCustomId(`qty_modal:${oppRecordId}:${encodedSize}`)
       .setTitle(`Quantity for ${size}`);
@@ -544,7 +616,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  /* ---------- Modal submit -> upsert line + update DM panel ---------- */
+  /* ---------- Modal submit -> upsert line + refresh DM panel ---------- */
   if (interaction.isModalSubmit() && interaction.customId.startsWith("qty_modal:")) {
     const [, oppRecordId, encodedSize] = interaction.customId.split(":");
     const size = sizeKeyDecode(encodedSize);
@@ -553,11 +625,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const qty = Number.parseInt(qtyRaw, 10);
 
     if (!Number.isFinite(qty) || qty < 0 || qty > 999) {
-      await interaction.reply({ content: "⚠️ Please enter a valid quantity (0–999).", ephemeral: true });
+      await interaction.reply({ content: "⚠️ Please enter a valid quantity (0–999)." });
       return;
     }
 
-    // Find commitment
+    // Find / create commitment
     let commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
     if (!commitment) {
       const buyer = await upsertBuyer(interaction.user);
@@ -569,43 +641,117 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
 
-    await upsertLine(commitment.id, size, qty);
-
-    // Refresh opportunity + rebuild DM panel
-    const opp = await oppsTable.find(oppRecordId);
-    const oppFields = opp.fields || {};
-    const oppEmbed = buildOpportunityEmbed(oppFields);
-
-    // Re-fetch commitment to read stored DM ids
-    const freshCommitment = await commitmentsTable.find(commitment.id);
-    const dmChannelId = asText(freshCommitment.fields[F.COM_DM_CHANNEL_ID]);
-    const dmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
-
-    const cartEmbed = new EmbedBuilder()
-      .setTitle("🧾 Bulk Cart")
-      .setDescription(await getCartLinesText(commitment.id))
-      .setColor(0xffd300);
-
-    const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
-    const components =
-      sizes.length > 0
-        ? buildSizeButtons(oppRecordId, sizes)
-        : [];
-
-    if (dmChannelId && dmMessageId) {
-      const ch = await client.channels.fetch(dmChannelId);
-      const msg = await ch.messages.fetch(dmMessageId);
-      await msg.edit({
-        embeds: [oppEmbed, cartEmbed],
-        components: components.length ? components : [],
-      });
+    // Guard after submission
+    const statusNow = asText((await commitmentsTable.find(commitment.id)).fields[F.COM_STATUS]) || "Draft";
+    if (statusNow === "Submitted") {
+      await interaction.reply({ content: "⚠️ This commitment is already submitted and can’t be edited." });
+      return;
     }
 
-    await interaction.reply({ content: `✅ Saved: **${size} × ${qty}**`, ephemeral: true });
+    await upsertLine(commitment.id, size, qty);
+    await touchCommitment(commitment.id);
+    await refreshDmPanel(oppRecordId, commitment.id);
+
+    await interaction.reply({ content: `✅ Saved: **${size} × ${qty}**` });
     return;
   }
 
-  // placeholders for next step (Review/Submit/Clear)
+  /* ---------- Review cart ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("cart_review:")) {
+    const oppRecordId = interaction.customId.split("cart_review:")[1];
+    await interaction.deferReply({ ephemeral: inGuild });
+
+    try {
+      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+      if (!commitment) {
+        await interaction.editReply("🧾 No cart found yet. Pick a size first.");
+        return;
+      }
+
+      const cartText = await getCartLinesText(commitment.id);
+      await touchCommitment(commitment.id);
+
+      await interaction.editReply(`Here’s your cart:\n\n${cartText}`);
+      return;
+    } catch (err) {
+      console.error("cart_review error:", err);
+      await interaction.editReply("⚠️ Could not load your cart.");
+      return;
+    }
+  }
+
+  /* ---------- Clear cart ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("cart_clear:")) {
+    const oppRecordId = interaction.customId.split("cart_clear:")[1];
+    await interaction.deferReply({ ephemeral: inGuild });
+
+    try {
+      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+      if (!commitment) {
+        await interaction.editReply("🧾 No cart found yet.");
+        return;
+      }
+
+      const fresh = await commitmentsTable.find(commitment.id);
+      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
+      if (status === "Submitted") {
+        await interaction.editReply("⚠️ Already submitted. Contact staff for changes.");
+        return;
+      }
+
+      await deleteAllLines(commitment.id);
+      await touchCommitment(commitment.id, { [F.COM_STATUS]: "Draft" });
+      await refreshDmPanel(oppRecordId, commitment.id);
+
+      await interaction.editReply("🧹 Cleared your cart.");
+      return;
+    } catch (err) {
+      console.error("cart_clear error:", err);
+      await interaction.editReply("⚠️ Could not clear your cart.");
+      return;
+    }
+  }
+
+  /* ---------- Submit cart ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
+    const oppRecordId = interaction.customId.split("cart_submit:")[1];
+    await interaction.deferReply({ ephemeral: inGuild });
+
+    try {
+      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+      if (!commitment) {
+        await interaction.editReply("🧾 No cart found yet. Add sizes first.");
+        return;
+      }
+
+      const fresh = await commitmentsTable.find(commitment.id);
+      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
+      if (status === "Submitted") {
+        await interaction.editReply("✅ Already submitted.");
+        return;
+      }
+
+      const cartText = await getCartLinesText(commitment.id);
+      if (cartText.includes("No sizes selected")) {
+        await interaction.editReply("⚠️ Your cart is empty. Add at least one size before submitting.");
+        return;
+      }
+
+      await touchCommitment(commitment.id, {
+        [F.COM_STATUS]: "Submitted",
+        [F.COM_SUBMITTED_AT]: new Date().toISOString(),
+      });
+
+      await refreshDmPanel(oppRecordId, commitment.id);
+
+      await interaction.editReply("✅ Submitted! Your commitment is now locked.");
+      return;
+    } catch (err) {
+      console.error("cart_submit error:", err);
+      await interaction.editReply("⚠️ Could not submit your cart.");
+      return;
+    }
+  }
 });
 
 /* =========================
@@ -616,11 +762,11 @@ const app = express();
 app.use(morgan("tiny"));
 app.use(express.json());
 
-app.get("/", async (req, res) => {
+app.get("/", async (_req, res) => {
   res.send("Bulk bot is live ✅");
 });
 
-app.get("/airtable-test", async (req, res) => {
+app.get("/airtable-test", async (_req, res) => {
   try {
     const records = await buyersTable.select({ maxRecords: 1 }).firstPage();
     res.json({ ok: true, buyers_records_found: records.length });
@@ -650,7 +796,12 @@ app.post("/post-opportunity", async (req, res) => {
     const fields = opp.fields || {};
 
     if (fields["Discord Public Message ID"]) {
-      return res.json({ ok: true, skipped: true, reason: "Already posted", messageId: fields["Discord Public Message ID"] });
+      return res.json({
+        ok: true,
+        skipped: true,
+        reason: "Already posted",
+        messageId: fields["Discord Public Message ID"],
+      });
     }
 
     const embed = buildOpportunityEmbed(fields);
@@ -673,9 +824,7 @@ app.post("/post-opportunity", async (req, res) => {
       "Discord Public Message ID": String(msg.id),
       "Post Now": false,
     };
-    if (fields["Posted At"] !== undefined) {
-      updatePayload["Posted At"] = new Date().toISOString();
-    }
+    if (fields["Posted At"] !== undefined) updatePayload["Posted At"] = new Date().toISOString();
 
     await oppsTable.update(opportunityRecordId, updatePayload);
     return res.json({ ok: true, posted: true, messageId: msg.id });
@@ -704,7 +853,9 @@ app.post("/sync-opportunity", async (req, res) => {
     const messageId = fields["Discord Public Message ID"];
 
     if (!channelId || !messageId) {
-      return res.status(400).json({ ok: false, error: "Missing Discord Public Channel ID or Discord Public Message ID" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Missing Discord Public Channel ID or Discord Public Message ID" });
     }
 
     const channel = await client.channels.fetch(String(channelId));
