@@ -153,7 +153,7 @@ const COUNTED_STATUSES = new Set(["Submitted", "Editing", "Locked", "Deposit Pai
    Helpers
 ========================= */
 
-const escapeForFormula = (str) => String(str).replace(/'/g, "\\\\'");
+const escapeForFormula = (str) => String(str).replace(/'/g, "\\'");
 
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
@@ -291,7 +291,7 @@ function buildOpportunityEmbed(fields) {
     "",
     `**MOQ for Next Tier:** **${nextMinPairs}**`,
     `**Next Tier Discount:** **${nextDiscount}**`,
-  ].join("\\n");
+  ].join(String.fromCharCode(10));
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
 
@@ -440,7 +440,7 @@ async function getCartLinesText(commitmentRecordId) {
 
   if (!items.length) return "_No sizes selected yet._";
   items.sort((a, b) => a.size.localeCompare(b.size));
-  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\\n");
+  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\n");
 }
 
 async function deleteAllLines(commitmentRecordId) {
