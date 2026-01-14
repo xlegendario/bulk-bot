@@ -2,20 +2,12 @@ import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
 import Airtable from "airtable";
-import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  Events,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  MessageFlags,
-} from "discord.js";
+import {$1} from "discord.js";
+
+// Prevent the process from crashing on unhandled promise rejections (e.g., Discord "Unknown interaction")
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled promise rejection:", err);
+});
 
 /* =========================
    ENV
@@ -148,7 +140,7 @@ const COUNTED_STATUSES = new Set(["Submitted", "Editing", "Locked", "Deposit Pai
    Helpers
 ========================= */
 
-const escapeForFormula = (str) => String(str).replace(/'/g, "\\'");
+const escapeForFormula = (str) => String(str).replace(/'/g, "\'");
 
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
@@ -286,7 +278,8 @@ function buildOpportunityEmbed(fields) {
     "",
     `**MOQ for Next Tier:** **${nextMinPairs}**`,
     `**Next Tier Discount:** **${nextDiscount}**`,
-  ].join("\n");
+  ].join("
+");
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
 
@@ -435,7 +428,8 @@ async function getCartLinesText(commitmentRecordId) {
 
   if (!items.length) return "_No sizes selected yet._";
   items.sort((a, b) => a.size.localeCompare(b.size));
-  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\n");
+  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("
+");
 }
 
 async function deleteAllLines(commitmentRecordId) {
@@ -696,7 +690,9 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
 
   const cartEmbed = new EmbedBuilder()
     .setTitle("🧾 Bulk Cart")
-    .setDescription((await getCartLinesText(commitmentRecordId)) + `\n\n**Status:** **${status}**`)
+    .setDescription((await getCartLinesText(commitmentRecordId)) + `
+
+**Status:** **${status}**`)
     .setColor(0xffd300);
 
   const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
@@ -751,7 +747,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const oppEmbed = buildOpportunityEmbed(oppFields);
       const cartEmbed = new EmbedBuilder()
         .setTitle("🧾 Bulk Cart")
-        .setDescription((await getCartLinesText(commitment.id)) + `\n\n**Status:** **${status}**`)
+        .setDescription((await getCartLinesText(commitment.id)) + `
+
+**Status:** **${status}**`)
         .setColor(0xffd300);
 
       const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
@@ -864,6 +862,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   /* ---------- Modal submit -> upsert line (increase-only in Editing) + refresh DM panel ---------- */
   if (interaction.isModalSubmit() && interaction.customId.startsWith("qty_modal:")) {
+    // ACK immediately to avoid Discord 10062 (Unknown interaction) if Airtable/DM updates take >3s
+    await interaction.deferReply();
     const [, oppRecordId, encodedSize] = interaction.customId.split(":");
     const size = sizeKeyDecode(encodedSize);
 
@@ -871,7 +871,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const qty = Number.parseInt(qtyRaw, 10);
 
     if (!Number.isFinite(qty) || qty < 0 || qty > 999) {
-      await interaction.reply({ content: "⚠️ Please enter a valid quantity (0–999)." });
+      await interaction.editReply({ content: "⚠️ Please enter a valid quantity (0–999)." });
       return;
     }
 
@@ -891,7 +891,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Only Draft/Editing can modify quantities
     if (!EDITABLE_STATUSES.has(statusNow)) {
-      await interaction.reply({ content: "⚠️ This commitment is not editable right now." });
+      await interaction.editReply({ content: "⚠️ This commitment is not editable right now." });
       return;
     }
 
@@ -899,7 +899,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (statusNow === "Editing") {
       const existingQty = await getLineQty(commitment.id, size);
       if (qty < existingQty) {
-        await interaction.reply({
+        await interaction.editReply({
           content:
             "⚠️ While editing after submission, you can only **increase** quantities. Contact staff to reduce/remove.",
         });
@@ -912,7 +912,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await recalcOpportunityTotals(oppRecordId);
     await refreshDmPanel(oppRecordId, commitment.id);
 
-    await interaction.reply({ content: `✅ Saved: **${size} × ${qty}**` });
+    await interaction.editReply({ content: `✅ Saved: **${size} × ${qty}**` });
     return;
   }
 
@@ -931,7 +931,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const cartText = await getCartLinesText(commitment.id);
       await touchCommitment(commitment.id);
 
-      await interaction.editReply(`Here’s your cart:\n\n${cartText}`);
+      await interaction.editReply(`Here’s your cart:
+
+${cartText}`);
       return;
     } catch (err) {
       console.error("cart_review error:", err);
