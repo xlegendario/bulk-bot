@@ -115,6 +115,7 @@ const F = {
   COM_LAST_ACTIVITY: "Last Activity At",
   COM_OPP_RECORD_ID: "Opportunity Record ID", // helper field we set
   COM_COMMITTED_AT: "Committed At", // your Airtable field name
+  COM_LAST_ACTION: "Last Action", // optional text field (recommended) for DM feedback
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -353,10 +354,22 @@ async function updateCommitmentDM(commitmentRecordId, dmChannelId, dmMessageId) 
 }
 
 async function touchCommitment(commitmentRecordId, patch = {}) {
-  await commitmentsTable.update(commitmentRecordId, {
+  const payload = {
     [F.COM_LAST_ACTIVITY]: new Date().toISOString(),
     ...patch,
-  });
+  };
+
+  try {
+    await commitmentsTable.update(commitmentRecordId, payload);
+  } catch (err) {
+    // If optional fields (like Last Action) don't exist yet, retry without them
+    if (String(err?.error) === "UNKNOWN_FIELD_NAME" && payload[F.COM_LAST_ACTION] !== undefined) {
+      const { [F.COM_LAST_ACTION]: _ignored, ...rest } = payload;
+      await commitmentsTable.update(commitmentRecordId, rest);
+      return;
+    }
+    throw err;
+  }
 }
 
 async function findLatestCommitment(discordUserId, oppRecordId) {
@@ -705,11 +718,18 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
   const dmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
   const status = asText(freshCommitment.fields[F.COM_STATUS]) || "Draft";
 
+  const lastAction = asText(freshCommitment.fields[F.COM_LAST_ACTION]);
+
   const cartEmbed = new EmbedBuilder()
     .setTitle("🧾 Bulk Cart")
-    .setDescription((await getCartLinesText(commitmentRecordId)) + `
+    .setDescription(
+      (await getCartLinesText(commitmentRecordId)) +
+        `
 
-**Status:** **${status}**`)
+**Status:** **${status}**` +
+        (lastAction ? `
+**Last update:** ${lastAction}` : "")
+    )
     .setColor(0xffd300);
 
   const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
@@ -727,6 +747,14 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
 
 function deferEphemeralIfGuild(inGuild) {
   return inGuild ? { flags: MessageFlags.Ephemeral } : {};
+}
+
+function scheduleDeleteInteractionReply(interaction, ms = 2000) {
+  // In DMs, replies are not dismissible like ephemeral messages in guilds.
+  // Use this for ERROR/info replies only. For successful saves we delete immediately.
+  setTimeout(() => {
+    interaction.deleteReply().catch(() => {});
+  }, ms);
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -762,11 +790,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const dm = await interaction.user.createDM();
 
       const oppEmbed = buildOpportunityEmbed(oppFields);
+      const lastAction = asText(freshCommitment.fields[F.COM_LAST_ACTION]);
+
       const cartEmbed = new EmbedBuilder()
         .setTitle("🧾 Bulk Cart")
-        .setDescription((await getCartLinesText(commitment.id)) + `
+        .setDescription(
+          (await getCartLinesText(commitment.id)) +
+            `
 
-**Status:** **${status}**`)
+**Status:** **${status}**` +
+            (lastAction ? `
+**Last update:** ${lastAction}` : "")
+        )
         .setColor(0xffd300);
 
       const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
@@ -889,6 +924,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (!Number.isFinite(qty) || qty < 0 || qty > 999) {
       await interaction.editReply({ content: "⚠️ Please enter a valid quantity (0–999)." });
+      scheduleDeleteInteractionReply(interaction);
       return;
     }
 
@@ -909,6 +945,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Only Draft/Editing can modify quantities
     if (!EDITABLE_STATUSES.has(statusNow)) {
       await interaction.editReply({ content: "⚠️ This commitment is not editable right now." });
+      scheduleDeleteInteractionReply(interaction);
       return;
     }
 
@@ -920,16 +957,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content:
             "⚠️ While editing after submission, you can only **increase** quantities. Contact staff to reduce/remove.",
         });
+        scheduleDeleteInteractionReply(interaction);
         return;
       }
     }
 
     await upsertLine(commitment.id, size, qty);
-    await touchCommitment(commitment.id);
+    await touchCommitment(commitment.id, {
+      [F.COM_LAST_ACTION]: `Saved ${size} × ${qty}`,
+    });
     await recalcOpportunityTotals(oppRecordId);
     await refreshDmPanel(oppRecordId, commitment.id);
 
-    await interaction.editReply({ content: `✅ Saved: **${size} × ${qty}**` });
+    // Don’t clutter DMs with confirmations; the panel shows the Last update line.
+    await interaction.deleteReply().catch(() => {});
     return;
   }
 
