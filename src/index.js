@@ -31,6 +31,7 @@ const {
   AIRTABLE_COMMITMENTS_TABLE = "Commitments",
   AIRTABLE_LINES_TABLE = "Commitment Lines",
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
+  AIRTABLE_TIERS_TABLE = "Opportunity Tiers",
 
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
@@ -57,6 +58,7 @@ const oppsTable = base(AIRTABLE_OPPS_TABLE);
 const commitmentsTable = base(AIRTABLE_COMMITMENTS_TABLE);
 const linesTable = base(AIRTABLE_LINES_TABLE);
 const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
+const tiersTable = base(AIRTABLE_TIERS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 console.log("✅ Buyers table:", AIRTABLE_BUYERS_TABLE);
@@ -64,6 +66,7 @@ console.log("✅ Opportunities table:", AIRTABLE_OPPS_TABLE);
 console.log("✅ Commitments table:", AIRTABLE_COMMITMENTS_TABLE);
 console.log("✅ Commitment Lines table:", AIRTABLE_LINES_TABLE);
 console.log("✅ Size Presets table:", AIRTABLE_SIZE_PRESETS_TABLE);
+console.log("✅ Tiers table:", AIRTABLE_TIERS_TABLE);
 
 /* =========================
    Field name constants
@@ -113,6 +116,12 @@ const F = {
   // Size Presets
   PRESET_SIZE_LADDER: "Size Ladder",
   PRESET_LINKED_SKUS: "Linked SKU's",
+
+  // Tiers (table: Opportunity Tiers)
+  TIER_OPPORTUNITY: "Opportunity", // linked to Opportunities
+  TIER_MIN_PAIRS: "Min Pairs",
+  TIER_DISCOUNT: "Discount %", // either 0-1 or 0-100
+  TIER_SELL_PRICE: "Sell Price", // optional; if empty we compute from Start Sell Price and discount
 };
 
 /* =========================
@@ -124,6 +133,10 @@ const EDITABLE_STATUSES = new Set(["Draft", "Editing"]);
 
 // Everything in this set is hard-locked (no edits, no add-more)
 const HARD_LOCKED_STATUSES = new Set(["Locked", "Deposit Paid", "Paid", "Cancelled"]);
+
+// Commitments that should COUNT towards Opportunity totals (tier progress)
+// Important: Editing must still count, otherwise totals/discount would drop when someone clicks Add More
+const COUNTED_STATUSES = new Set(["Submitted", "Editing", "Locked", "Deposit Paid", "Paid"]);
 
 /* =========================
    Helpers
@@ -432,6 +445,149 @@ async function deleteAllLines(commitmentRecordId) {
   const chunkSize = 10;
   for (let i = 0; i < ids.length; i += chunkSize) {
     await linesTable.destroy(ids.slice(i, i + chunkSize));
+  }
+}
+
+function buildOrFormula(fieldName, values) {
+  // OR({Field}='a',{Field}='b',...)
+  const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
+  if (!parts.length) return "FALSE()";
+  if (parts.length === 1) return parts[0];
+  return `OR(${parts.join(",")})`;
+}
+
+async function recalcOpportunityTotals(oppRecordId) {
+  // 1) Find counted commitments for this opportunity
+  const statusOr = buildOrFormula(F.COM_STATUS, Array.from(COUNTED_STATUSES));
+  const commitments = await commitmentsTable
+    .select({
+      filterByFormula: `AND({${F.COM_OPP_RECORD_ID}} = '${escapeForFormula(oppRecordId)}', ${statusOr})`,
+      maxRecords: 1000,
+    })
+    .all();
+
+  const commitmentIds = commitments.map((r) => r.id);
+  if (!commitmentIds.length) {
+    await oppsTable.update(oppRecordId, { [F.OPP_CURRENT_TOTAL_PAIRS]: 0 });
+    // still try pricing so next tier fields reset
+    await recalcOpportunityPricing(oppRecordId, 0);
+    return 0;
+  }
+
+  // 2) Sum quantities for all lines belonging to those commitments
+  // Airtable formula length limits mean we should chunk the OR(...) query.
+  const chunkSize = 25;
+  let total = 0;
+
+  for (let i = 0; i < commitmentIds.length; i += chunkSize) {
+    const chunk = commitmentIds.slice(i, i + chunkSize);
+    const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
+
+    const lines = await linesTable
+      .select({
+        filterByFormula: `${orChunk}`,
+        maxRecords: 1000,
+      })
+      .all();
+
+    for (const line of lines) {
+      const q = Number(line.fields[F.LINE_QTY] || 0);
+      if (Number.isFinite(q) && q > 0) total += q;
+    }
+  }
+
+  // 3) Write total back to opportunity
+  await oppsTable.update(oppRecordId, { [F.OPP_CURRENT_TOTAL_PAIRS]: total });
+
+  // 4) Recalculate tier pricing/next tier info
+  await recalcOpportunityPricing(oppRecordId, total);
+
+  return total;
+}
+
+function normalizeDiscount(raw) {
+  // supports 0.05 or 5
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  if (n > 1) return n / 100;
+  if (n < 0) return 0;
+  return n;
+}
+
+async function fetchTiersForOpportunity(oppRecordId) {
+  // We expect tiers table rows with a linked record field to Opportunities.
+  // Using ARRAYJOIN so we can FIND the record id inside the linked field.
+  const rows = await tiersTable
+    .select({
+      maxRecords: 200,
+      filterByFormula: `FIND('${escapeForFormula(oppRecordId)}', ARRAYJOIN({${F.TIER_OPPORTUNITY}} & '')) > 0`,
+      sort: [{ field: F.TIER_MIN_PAIRS, direction: 'asc' }],
+    })
+    .all();
+
+  return rows
+    .map((r) => ({
+      id: r.id,
+      minPairs: Number(r.fields[F.TIER_MIN_PAIRS] || 0),
+      discount: normalizeDiscount(r.fields[F.TIER_DISCOUNT] ?? 0),
+      sellPrice: r.fields[F.TIER_SELL_PRICE],
+    }))
+    .filter((t) => Number.isFinite(t.minPairs) && t.minPairs >= 0)
+    .sort((a, b) => a.minPairs - b.minPairs);
+}
+
+async function recalcOpportunityPricing(oppRecordId, totalPairs) {
+  // This function is designed to be safe:
+  // - If the tiers table/fields are not configured, it will log and exit.
+  try {
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    const startPriceRaw = oppFields[F.OPP_START_SELL_PRICE];
+    const startPrice = Number(asText(startPriceRaw));
+
+    const tiers = await fetchTiersForOpportunity(oppRecordId);
+    if (!tiers.length) {
+      // If no tiers found, keep current fields as-is but make sure next-tier fields are cleared.
+      await oppsTable.update(oppRecordId, {
+        [F.OPP_NEXT_MIN_PAIRS]: null,
+        [F.OPP_NEXT_DISCOUNT]: null,
+      });
+      return;
+    }
+
+    // Current tier = highest tier with minPairs <= totalPairs
+    let current = tiers[0];
+    for (const t of tiers) {
+      if (totalPairs >= t.minPairs) current = t;
+      else break;
+    }
+
+    // Next tier = first tier above current totalPairs
+    const next = tiers.find((t) => t.minPairs > totalPairs) || null;
+
+    // Determine current sell price
+    let currentSellPrice = null;
+    if (current.sellPrice !== undefined && current.sellPrice !== null && String(current.sellPrice) !== "") {
+      const sp = Number(asText(current.sellPrice));
+      if (Number.isFinite(sp)) currentSellPrice = sp;
+    }
+
+    if (currentSellPrice === null && Number.isFinite(startPrice)) {
+      currentSellPrice = startPrice * (1 - (current.discount || 0));
+    }
+
+    const updatePayload = {
+      [F.OPP_CURRENT_DISCOUNT]: current.discount || 0,
+      [F.OPP_CURRENT_SELL_PRICE]: currentSellPrice ?? null,
+      [F.OPP_NEXT_MIN_PAIRS]: next ? next.minPairs : null,
+      [F.OPP_NEXT_DISCOUNT]: next ? next.discount : null,
+    };
+
+    await oppsTable.update(oppRecordId, updatePayload);
+  } catch (err) {
+    // Don’t break cart flows if tiers are misconfigured
+    console.warn("⚠️ recalcOpportunityPricing skipped/error:", err?.message || err);
   }
 }
 
@@ -753,6 +909,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await upsertLine(commitment.id, size, qty);
     await touchCommitment(commitment.id);
+    await recalcOpportunityTotals(oppRecordId);
     await refreshDmPanel(oppRecordId, commitment.id);
 
     await interaction.reply({ content: `✅ Saved: **${size} × ${qty}**` });
@@ -803,6 +960,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await deleteAllLines(commitment.id);
       await touchCommitment(commitment.id, { [F.COM_STATUS]: "Draft" });
+      await recalcOpportunityTotals(oppRecordId);
       await refreshDmPanel(oppRecordId, commitment.id);
 
       await interaction.editReply("🧹 Cleared your cart.");
@@ -843,9 +1001,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         [F.COM_COMMITTED_AT]: new Date().toISOString(),
       });
 
+      await recalcOpportunityTotals(oppRecordId);
       await refreshDmPanel(oppRecordId, commitment.id);
 
-      await interaction.editReply("✅ Submitted! Your commitment is now locked. Use **Add More** if you want to increase.");
+      await interaction.editReply(
+        "✅ Submitted! Your commitment is now locked. Use **Add More** if you want to increase."
+      );
       return;
     } catch (err) {
       console.error("cart_submit error:", err);
