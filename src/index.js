@@ -14,6 +14,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  MessageFlags,
 } from "discord.js";
 
 /* =========================
@@ -100,7 +101,8 @@ const F = {
   COM_DM_MESSAGE_ID: "Discord Summary Message ID",
   COM_LAST_ACTIVITY: "Last Activity At",
   COM_OPP_RECORD_ID: "Opportunity Record ID", // optional helper field
-  COM_SUBMITTED_AT: "Submitted At",
+  // IMPORTANT: you named this in Airtable as "Committed At"
+  COM_COMMITTED_AT: "Committed At",
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -112,6 +114,16 @@ const F = {
   PRESET_SIZE_LADDER: "Size Ladder",
   PRESET_LINKED_SKUS: "Linked SKU's",
 };
+
+/* =========================
+   Status rules
+========================= */
+
+// Buyers can edit cart only in these statuses:
+const EDITABLE_STATUSES = new Set(["Draft", "Editing"]);
+
+// Everything in this set is hard-locked (no edits, no add-more)
+const HARD_LOCKED_STATUSES = new Set(["Locked", "Deposit Paid", "Paid", "Cancelled"]);
 
 /* =========================
    Helpers
@@ -153,12 +165,8 @@ function formatPercent(v) {
 }
 
 function getAirtableAttachmentUrl(fieldValue) {
-  if (Array.isArray(fieldValue) && fieldValue.length > 0 && fieldValue[0]?.url) {
-    return fieldValue[0].url;
-  }
-  if (typeof fieldValue === "string" && fieldValue.startsWith("http")) {
-    return fieldValue;
-  }
+  if (Array.isArray(fieldValue) && fieldValue.length > 0 && fieldValue[0]?.url) return fieldValue[0].url;
+  if (typeof fieldValue === "string" && fieldValue.startsWith("http")) return fieldValue;
   return null;
 }
 
@@ -183,7 +191,7 @@ function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
   const i1 = min ? ladder.indexOf(min) : -1;
   const i2 = max ? ladder.indexOf(max) : -1;
 
-  // if min/max not found in ladder, just return full ladder (better than no buttons)
+  // If min/max not found, return full ladder rather than no buttons
   if ((min && i1 === -1) || (max && i2 === -1)) return ladder;
 
   if (min && !max) return ladder.slice(i1);
@@ -221,7 +229,6 @@ async function resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields) {
   const sliced = sliceLadderByMinMax(ladder, oppFields[F.OPP_MIN_SIZE], oppFields[F.OPP_MAX_SIZE]);
   if (!sliced.length) return [];
 
-  // Writeback (only when empty)
   await oppsTable.update(oppRecordId, {
     [F.OPP_ALLOWED_SIZES]: sliced.join(", "),
   });
@@ -243,11 +250,7 @@ function buildOpportunityEmbed(fields) {
   const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
 
-  const currentPrice = formatMoney(
-    currency,
-    fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]
-  );
-
+  const currentPrice = formatMoney(currency, fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]);
   const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
   const currentTotalPairs = asText(fields[F.OPP_CURRENT_TOTAL_PAIRS]) || "—";
   const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
@@ -344,6 +347,11 @@ async function findLatestCommitment(discordUserId, oppRecordId) {
   return rows.length ? rows[0] : null;
 }
 
+async function getCommitmentStatus(commitmentRecordId) {
+  const fresh = await commitmentsTable.find(commitmentRecordId);
+  return asText(fresh.fields[F.COM_STATUS]) || "Draft";
+}
+
 async function upsertLine(commitmentRecordId, size, qty) {
   const found = await linesTable
     .select({
@@ -373,6 +381,21 @@ async function upsertLine(commitmentRecordId, size, qty) {
   });
 }
 
+async function getLineQty(commitmentRecordId, size) {
+  const found = await linesTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `AND(
+        {${F.LINE_COMMITMENT_RECORD_ID}} = '${escapeForFormula(commitmentRecordId)}',
+        {${F.LINE_SIZE}} = '${escapeForFormula(size)}'
+      )`,
+    })
+    .firstPage();
+
+  if (!found.length) return 0;
+  return Number(found[0].fields[F.LINE_QTY] || 0);
+}
+
 async function getCartLinesText(commitmentRecordId) {
   const rows = await linesTable
     .select({
@@ -392,7 +415,6 @@ async function getCartLinesText(commitmentRecordId) {
 
   if (!items.length) return "_No sizes selected yet._";
   items.sort((a, b) => a.size.localeCompare(b.size));
-
   return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\n");
 }
 
@@ -414,14 +436,19 @@ async function deleteAllLines(commitmentRecordId) {
 }
 
 function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
-  const { locked = false } = opts;
+  const { status = "Draft" } = opts;
 
+  const isEditable = EDITABLE_STATUSES.has(status);
+  const isSubmitted = status === "Submitted";
+  const isHardLocked = HARD_LOCKED_STATUSES.has(status);
+
+  // Size buttons: enabled only when editable
   const rows = [];
   let row = new ActionRowBuilder();
   let inRow = 0;
 
   for (const s of sizes) {
-    if (rows.length === 4) break; // leave 5th row for controls
+    if (rows.length === 4) break; // leave last row for controls
     if (inRow === 5) {
       rows.push(row);
       row = new ActionRowBuilder();
@@ -433,33 +460,54 @@ function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
         .setCustomId(`size_pick:${opportunityRecordId}:${sizeKeyEncode(s)}`)
         .setLabel(s)
         .setStyle(ButtonStyle.Secondary)
-        .setDisabled(locked)
+        .setDisabled(!isEditable)
     );
     inRow++;
   }
   if (inRow > 0 && rows.length < 4) rows.push(row);
 
-  rows.push(
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`cart_review:${opportunityRecordId}`)
-        .setLabel("Review")
-        .setStyle(ButtonStyle.Primary),
+  // Controls row:
+  // - Editable: Review, Submit, Clear
+  // - Submitted: Review, Add More
+  // - Hard locked: Review only (everything else disabled)
+  const controls = new ActionRowBuilder();
 
+  controls.addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cart_review:${opportunityRecordId}`)
+      .setLabel("Review")
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  if (isEditable) {
+    controls.addComponents(
       new ButtonBuilder()
         .setCustomId(`cart_submit:${opportunityRecordId}`)
         .setLabel("Submit")
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(locked),
-
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder()
         .setCustomId(`cart_clear:${opportunityRecordId}`)
         .setLabel("Clear")
         .setStyle(ButtonStyle.Danger)
-        .setDisabled(locked)
-    )
-  );
+    );
+  } else if (isSubmitted) {
+    controls.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`cart_addmore:${opportunityRecordId}`)
+        .setLabel("Add More")
+        .setStyle(ButtonStyle.Success)
+    );
+  } else if (isHardLocked) {
+    controls.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`cart_locked:${opportunityRecordId}`)
+        .setLabel("Locked")
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true)
+    );
+  }
 
+  rows.push(controls);
   return rows;
 }
 
@@ -481,9 +529,7 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
     .setColor(0xffd300);
 
   const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
-  const locked = status === "Submitted";
-
-  const components = sizes.length ? buildSizeButtons(oppRecordId, sizes, { locked }) : [];
+  const components = sizes.length ? buildSizeButtons(oppRecordId, sizes, { status }) : [];
 
   if (dmChannelId && dmMessageId) {
     const ch = await client.channels.fetch(dmChannelId);
@@ -493,6 +539,10 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
       components: components.length ? components : [],
     });
   }
+}
+
+function deferEphemeralIfGuild(inGuild) {
+  return inGuild ? { flags: MessageFlags.Ephemeral } : {};
 }
 
 /* =========================
@@ -514,7 +564,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   /* ---------- Join Bulk (from public channel) ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-    await interaction.deferReply({ ephemeral: inGuild });
+    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
       const opp = await oppsTable.find(opportunityRecordId);
@@ -535,7 +585,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const freshCommitment = await commitmentsTable.find(commitment.id);
       const status = asText(freshCommitment.fields[F.COM_STATUS]) || "Draft";
-      const locked = status === "Submitted";
       const storedDmChannelId = asText(freshCommitment.fields[F.COM_DM_CHANNEL_ID]);
       const storedDmMessageId = asText(freshCommitment.fields[F.COM_DM_MESSAGE_ID]);
 
@@ -548,7 +597,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setColor(0xffd300);
 
       const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
-      const components = sizes.length ? buildSizeButtons(opportunityRecordId, sizes, { locked }) : [];
+      const components = sizes.length ? buildSizeButtons(opportunityRecordId, sizes, { status }) : [];
 
       // Update existing panel if we have ids, otherwise send new
       let msg;
@@ -586,6 +635,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
+  /* ---------- Add More (Submitted -> Editing) ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("cart_addmore:")) {
+    const oppRecordId = interaction.customId.split("cart_addmore:")[1];
+    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
+
+    try {
+      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+      if (!commitment) {
+        await interaction.editReply("🧾 No cart found yet.");
+        return;
+      }
+
+      const fresh = await commitmentsTable.find(commitment.id);
+      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
+
+      if (status !== "Submitted") {
+        await interaction.editReply("⚠️ Add More is only available after you submit.");
+        return;
+      }
+
+      await touchCommitment(commitment.id, { [F.COM_STATUS]: "Editing" });
+      await refreshDmPanel(oppRecordId, commitment.id);
+
+      await interaction.editReply("✅ Editing enabled. Add more sizes and press Submit again to confirm.");
+      return;
+    } catch (err) {
+      console.error("cart_addmore error:", err);
+      await interaction.editReply("⚠️ Could not enable editing. Try again.");
+      return;
+    }
+  }
+
+  /* ---------- Locked indicator (no-op) ---------- */
+  if (interaction.isButton() && interaction.customId.startsWith("cart_locked:")) {
+    await interaction.reply({
+      content: "🔒 This commitment is locked. Contact staff if you need changes.",
+      ...deferEphemeralIfGuild(inGuild),
+    });
+    return;
+  }
+
   /* ---------- Size button -> modal ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("size_pick:")) {
     const [, oppRecordId, encodedSize] = interaction.customId.split(":");
@@ -593,10 +683,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
     if (commitment) {
-      const fresh = await commitmentsTable.find(commitment.id);
-      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
-      if (status === "Submitted") {
-        await interaction.reply({ content: "⚠️ This commitment is already submitted and can’t be edited." });
+      const status = await getCommitmentStatus(commitment.id);
+      if (!EDITABLE_STATUSES.has(status)) {
+        await interaction.reply({ content: "⚠️ This commitment is not editable right now." });
         return;
       }
     }
@@ -616,7 +705,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  /* ---------- Modal submit -> upsert line + refresh DM panel ---------- */
+  /* ---------- Modal submit -> upsert line (increase-only in Editing) + refresh DM panel ---------- */
   if (interaction.isModalSubmit() && interaction.customId.startsWith("qty_modal:")) {
     const [, oppRecordId, encodedSize] = interaction.customId.split(":");
     const size = sizeKeyDecode(encodedSize);
@@ -641,11 +730,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
 
-    // Guard after submission
-    const statusNow = asText((await commitmentsTable.find(commitment.id)).fields[F.COM_STATUS]) || "Draft";
-    if (statusNow === "Submitted") {
-      await interaction.reply({ content: "⚠️ This commitment is already submitted and can’t be edited." });
+    const statusNow = await getCommitmentStatus(commitment.id);
+
+    // Only Draft/Editing can modify quantities
+    if (!EDITABLE_STATUSES.has(statusNow)) {
+      await interaction.reply({ content: "⚠️ This commitment is not editable right now." });
       return;
+    }
+
+    // Increase-only policy in Editing:
+    // - In Draft: allow any change
+    // - In Editing: only allow qty >= existing qty (no decreases/removal)
+    if (statusNow === "Editing") {
+      const existingQty = await getLineQty(commitment.id, size);
+      if (qty < existingQty) {
+        await interaction.reply({
+          content: "⚠️ While editing after submission, you can only **increase** quantities. Contact staff to reduce/remove.",
+        });
+        return;
+      }
     }
 
     await upsertLine(commitment.id, size, qty);
@@ -659,7 +762,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   /* ---------- Review cart ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("cart_review:")) {
     const oppRecordId = interaction.customId.split("cart_review:")[1];
-    await interaction.deferReply({ ephemeral: inGuild });
+    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -680,10 +783,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  /* ---------- Clear cart ---------- */
+  /* ---------- Clear cart (Draft only) ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("cart_clear:")) {
     const oppRecordId = interaction.customId.split("cart_clear:")[1];
-    await interaction.deferReply({ ephemeral: inGuild });
+    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -692,10 +795,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const fresh = await commitmentsTable.find(commitment.id);
-      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
-      if (status === "Submitted") {
-        await interaction.editReply("⚠️ Already submitted. Contact staff for changes.");
+      const status = await getCommitmentStatus(commitment.id);
+      if (status !== "Draft") {
+        await interaction.editReply("⚠️ You can only clear while in Draft.");
         return;
       }
 
@@ -712,10 +814,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  /* ---------- Submit cart ---------- */
+  /* ---------- Submit cart (Draft/Editing -> Submitted) ---------- */
   if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
     const oppRecordId = interaction.customId.split("cart_submit:")[1];
-    await interaction.deferReply({ ephemeral: inGuild });
+    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -724,10 +826,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const fresh = await commitmentsTable.find(commitment.id);
-      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
-      if (status === "Submitted") {
-        await interaction.editReply("✅ Already submitted.");
+      const status = await getCommitmentStatus(commitment.id);
+      if (status !== "Draft" && status !== "Editing") {
+        await interaction.editReply("⚠️ This commitment can’t be submitted right now.");
         return;
       }
 
@@ -739,12 +840,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await touchCommitment(commitment.id, {
         [F.COM_STATUS]: "Submitted",
-        [F.COM_SUBMITTED_AT]: new Date().toISOString(),
+        [F.COM_COMMITTED_AT]: new Date().toISOString(),
       });
 
       await refreshDmPanel(oppRecordId, commitment.id);
 
-      await interaction.editReply("✅ Submitted! Your commitment is now locked.");
+      await interaction.editReply("✅ Submitted! Your commitment is now locked. Use **Add More** if you want to increase.");
       return;
     } catch (err) {
       console.error("cart_submit error:", err);
