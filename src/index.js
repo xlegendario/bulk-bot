@@ -654,12 +654,7 @@ function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
 
   const controls = new ActionRowBuilder();
 
-  controls.addComponents(
-    new ButtonBuilder()
-      .setCustomId(`cart_review:${opportunityRecordId}`)
-      .setLabel("Review")
-      .setStyle(ButtonStyle.Primary)
-  );
+  
 
   if (isEditable) {
     controls.addComponents(
@@ -727,6 +722,7 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
         `
 
 **Status:** **${status}**` +
+        "\n\n" +
         (lastAction ? `
 **Last update:** ${lastAction}` : "")
     )
