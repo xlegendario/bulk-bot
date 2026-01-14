@@ -2,7 +2,20 @@ import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
 import Airtable from "airtable";
-import {$1} from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  Events,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  MessageFlags,
+} from "discord.js";
 
 // Prevent the process from crashing on unhandled promise rejections (e.g., Discord "Unknown interaction")
 process.on("unhandledRejection", (err) => {
@@ -140,7 +153,7 @@ const COUNTED_STATUSES = new Set(["Submitted", "Editing", "Locked", "Deposit Pai
    Helpers
 ========================= */
 
-const escapeForFormula = (str) => String(str).replace(/'/g, "\'");
+const escapeForFormula = (str) => String(str).replace(/'/g, "\\\\'");
 
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
@@ -278,8 +291,7 @@ function buildOpportunityEmbed(fields) {
     "",
     `**MOQ for Next Tier:** **${nextMinPairs}**`,
     `**Next Tier Discount:** **${nextDiscount}**`,
-  ].join("
-");
+  ].join("\\n");
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
 
@@ -428,8 +440,7 @@ async function getCartLinesText(commitmentRecordId) {
 
   if (!items.length) return "_No sizes selected yet._";
   items.sort((a, b) => a.size.localeCompare(b.size));
-  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("
-");
+  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join("\\n");
 }
 
 async function deleteAllLines(commitmentRecordId) {
