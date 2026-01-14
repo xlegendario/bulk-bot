@@ -31,7 +31,10 @@ const {
   AIRTABLE_COMMITMENTS_TABLE = "Commitments",
   AIRTABLE_LINES_TABLE = "Commitment Lines",
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
-  AIRTABLE_TIERS_TABLE = "Opportunity Tiers",
+
+  // Tier engine tables
+  AIRTABLE_TIER_RULES_TABLE = "Tier Rules",
+  AIRTABLE_TIER_RULE_SETS_TABLE = "Tier Rule Sets",
 
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
@@ -58,7 +61,8 @@ const oppsTable = base(AIRTABLE_OPPS_TABLE);
 const commitmentsTable = base(AIRTABLE_COMMITMENTS_TABLE);
 const linesTable = base(AIRTABLE_LINES_TABLE);
 const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
-const tiersTable = base(AIRTABLE_TIERS_TABLE);
+const tierRulesTable = base(AIRTABLE_TIER_RULES_TABLE);
+const tierRuleSetsTable = base(AIRTABLE_TIER_RULE_SETS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 console.log("✅ Buyers table:", AIRTABLE_BUYERS_TABLE);
@@ -66,7 +70,8 @@ console.log("✅ Opportunities table:", AIRTABLE_OPPS_TABLE);
 console.log("✅ Commitments table:", AIRTABLE_COMMITMENTS_TABLE);
 console.log("✅ Commitment Lines table:", AIRTABLE_LINES_TABLE);
 console.log("✅ Size Presets table:", AIRTABLE_SIZE_PRESETS_TABLE);
-console.log("✅ Tiers table:", AIRTABLE_TIERS_TABLE);
+console.log("✅ Tier Rules table:", AIRTABLE_TIER_RULES_TABLE);
+console.log("✅ Tier Rule Sets table:", AIRTABLE_TIER_RULE_SETS_TABLE);
 
 /* =========================
    Field name constants
@@ -87,10 +92,10 @@ const F = {
   OPP_CURRENCY: "Currency",
   OPP_CURRENT_SELL_PRICE: "Current Sell Price",
   OPP_START_SELL_PRICE: "Start Sell Price",
-  OPP_CURRENT_DISCOUNT: "Current Discount %",
+  OPP_CURRENT_DISCOUNT: "Current Discount %", // store as decimal (0.02) for 2%
   OPP_CURRENT_TOTAL_PAIRS: "Current Total Pairs",
   OPP_NEXT_MIN_PAIRS: "Next Tier Min Pairs",
-  OPP_NEXT_DISCOUNT: "Next Tier Discount %",
+  OPP_NEXT_DISCOUNT: "Next Tier Discount %", // store as decimal (0.03) for 3%
   OPP_PICTURE: "Picture",
   OPP_ALLOWED_SIZES: "Allowed Sizes (Generated)",
 
@@ -103,9 +108,8 @@ const F = {
   COM_DM_CHANNEL_ID: "Discord Private Channel ID",
   COM_DM_MESSAGE_ID: "Discord Summary Message ID",
   COM_LAST_ACTIVITY: "Last Activity At",
-  COM_OPP_RECORD_ID: "Opportunity Record ID", // optional helper field
-  // IMPORTANT: you named this in Airtable as "Committed At"
-  COM_COMMITTED_AT: "Committed At",
+  COM_OPP_RECORD_ID: "Opportunity Record ID", // helper field we set
+  COM_COMMITTED_AT: "Committed At", // your Airtable field name
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -117,11 +121,13 @@ const F = {
   PRESET_SIZE_LADDER: "Size Ladder",
   PRESET_LINKED_SKUS: "Linked SKU's",
 
-  // Tiers (table: Opportunity Tiers)
-  TIER_OPPORTUNITY: "Opportunity", // linked to Opportunities
-  TIER_MIN_PAIRS: "Min Pairs",
-  TIER_DISCOUNT: "Discount %", // either 0-1 or 0-100
-  TIER_SELL_PRICE: "Sell Price", // optional; if empty we compute from Start Sell Price and discount
+  // Tier Rules
+  TR_MIN_PAIRS: "Min Pairs",
+  TR_DISCOUNT_PCT: "Discount %", // your table uses 1,2,3,... (percent)
+
+  // Tier Rule Sets
+  TRS_OPPORTUNITIES: "Opportunities", // linked to Opportunities
+  TRS_TIER_RULES: "Tier Rules", // linked to Tier Rules
 };
 
 /* =========================
@@ -169,6 +175,7 @@ function formatMoney(code, value) {
 }
 
 function formatPercent(v) {
+  // expects decimal (0.02) -> 2%
   const raw = asText(v);
   if (raw === "") return "—";
   const num = Number(raw);
@@ -449,11 +456,99 @@ async function deleteAllLines(commitmentRecordId) {
 }
 
 function buildOrFormula(fieldName, values) {
-  // OR({Field}='a',{Field}='b',...)
   const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
   if (!parts.length) return "FALSE()";
   if (parts.length === 1) return parts[0];
   return `OR(${parts.join(",")})`;
+}
+
+function normalizeDiscountPctToDecimal(raw) {
+  // supports values like 2 (meaning 2%) or 0.02
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  if (n > 1) return n / 100;
+  if (n < 0) return 0;
+  return n;
+}
+
+async function findRuleSetForOpportunity(oppRecordId) {
+  // We load rule sets and match by linked record id inclusion.
+  const sets = await tierRuleSetsTable.select({ maxRecords: 200 }).all();
+  for (const s of sets) {
+    const oppLinks = s.fields?.[F.TRS_OPPORTUNITIES];
+    if (Array.isArray(oppLinks) && oppLinks.includes(oppRecordId)) return s;
+  }
+  return null;
+}
+
+async function fetchTierRulesByIds(ruleIds) {
+  const ids = (ruleIds || []).filter(Boolean);
+  if (!ids.length) return [];
+
+  // Fetch in parallel; keep it robust
+  const records = await Promise.all(ids.map((id) => tierRulesTable.find(id).catch(() => null)));
+
+  return records
+    .filter(Boolean)
+    .map((r) => ({
+      id: r.id,
+      minPairs: Number(r.fields?.[F.TR_MIN_PAIRS] || 0),
+      discount: normalizeDiscountPctToDecimal(r.fields?.[F.TR_DISCOUNT_PCT] ?? 0),
+    }))
+    .filter((t) => Number.isFinite(t.minPairs) && t.minPairs >= 0)
+    .sort((a, b) => a.minPairs - b.minPairs);
+}
+
+async function fetchTiersForOpportunity(oppRecordId) {
+  const ruleSet = await findRuleSetForOpportunity(oppRecordId);
+  if (!ruleSet) return [];
+  const ruleIds = ruleSet.fields?.[F.TRS_TIER_RULES];
+  return await fetchTierRulesByIds(ruleIds);
+}
+
+async function recalcOpportunityPricing(oppRecordId, totalPairs) {
+  // Updates Opportunity fields based on the tier rules of the rule-set linked to this opportunity.
+  // Safe by design.
+  try {
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    const startPriceRaw = oppFields[F.OPP_START_SELL_PRICE];
+    const startPrice = Number(asText(startPriceRaw));
+
+    const tiers = await fetchTiersForOpportunity(oppRecordId);
+    if (!tiers.length) {
+      // No tier config found -> clear next tier hints
+      await oppsTable.update(oppRecordId, {
+        [F.OPP_NEXT_MIN_PAIRS]: null,
+        [F.OPP_NEXT_DISCOUNT]: null,
+      });
+      return;
+    }
+
+    // Current tier = highest tier with minPairs <= totalPairs
+    let current = tiers[0];
+    for (const t of tiers) {
+      if (totalPairs >= t.minPairs) current = t;
+      else break;
+    }
+
+    const next = tiers.find((t) => t.minPairs > totalPairs) || null;
+
+    let currentSellPrice = null;
+    if (Number.isFinite(startPrice)) {
+      currentSellPrice = startPrice * (1 - (current.discount || 0));
+    }
+
+    await oppsTable.update(oppRecordId, {
+      [F.OPP_CURRENT_DISCOUNT]: current.discount || 0,
+      [F.OPP_CURRENT_SELL_PRICE]: currentSellPrice ?? null,
+      [F.OPP_NEXT_MIN_PAIRS]: next ? next.minPairs : null,
+      [F.OPP_NEXT_DISCOUNT]: next ? next.discount : null,
+    });
+  } catch (err) {
+    console.warn("⚠️ recalcOpportunityPricing skipped/error:", err?.message || err);
+  }
 }
 
 async function recalcOpportunityTotals(oppRecordId) {
@@ -469,13 +564,11 @@ async function recalcOpportunityTotals(oppRecordId) {
   const commitmentIds = commitments.map((r) => r.id);
   if (!commitmentIds.length) {
     await oppsTable.update(oppRecordId, { [F.OPP_CURRENT_TOTAL_PAIRS]: 0 });
-    // still try pricing so next tier fields reset
     await recalcOpportunityPricing(oppRecordId, 0);
     return 0;
   }
 
-  // 2) Sum quantities for all lines belonging to those commitments
-  // Airtable formula length limits mean we should chunk the OR(...) query.
+  // 2) Sum quantities for all lines belonging to those commitments (chunked)
   const chunkSize = 25;
   let total = 0;
 
@@ -496,99 +589,13 @@ async function recalcOpportunityTotals(oppRecordId) {
     }
   }
 
-  // 3) Write total back to opportunity
+  // 3) Write total back
   await oppsTable.update(oppRecordId, { [F.OPP_CURRENT_TOTAL_PAIRS]: total });
 
-  // 4) Recalculate tier pricing/next tier info
+  // 4) Update pricing tiers
   await recalcOpportunityPricing(oppRecordId, total);
 
   return total;
-}
-
-function normalizeDiscount(raw) {
-  // supports 0.05 or 5
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 0;
-  if (n > 1) return n / 100;
-  if (n < 0) return 0;
-  return n;
-}
-
-async function fetchTiersForOpportunity(oppRecordId) {
-  // We expect tiers table rows with a linked record field to Opportunities.
-  // Using ARRAYJOIN so we can FIND the record id inside the linked field.
-  const rows = await tiersTable
-    .select({
-      maxRecords: 200,
-      filterByFormula: `FIND('${escapeForFormula(oppRecordId)}', ARRAYJOIN({${F.TIER_OPPORTUNITY}} & '')) > 0`,
-      sort: [{ field: F.TIER_MIN_PAIRS, direction: 'asc' }],
-    })
-    .all();
-
-  return rows
-    .map((r) => ({
-      id: r.id,
-      minPairs: Number(r.fields[F.TIER_MIN_PAIRS] || 0),
-      discount: normalizeDiscount(r.fields[F.TIER_DISCOUNT] ?? 0),
-      sellPrice: r.fields[F.TIER_SELL_PRICE],
-    }))
-    .filter((t) => Number.isFinite(t.minPairs) && t.minPairs >= 0)
-    .sort((a, b) => a.minPairs - b.minPairs);
-}
-
-async function recalcOpportunityPricing(oppRecordId, totalPairs) {
-  // This function is designed to be safe:
-  // - If the tiers table/fields are not configured, it will log and exit.
-  try {
-    const opp = await oppsTable.find(oppRecordId);
-    const oppFields = opp.fields || {};
-
-    const startPriceRaw = oppFields[F.OPP_START_SELL_PRICE];
-    const startPrice = Number(asText(startPriceRaw));
-
-    const tiers = await fetchTiersForOpportunity(oppRecordId);
-    if (!tiers.length) {
-      // If no tiers found, keep current fields as-is but make sure next-tier fields are cleared.
-      await oppsTable.update(oppRecordId, {
-        [F.OPP_NEXT_MIN_PAIRS]: null,
-        [F.OPP_NEXT_DISCOUNT]: null,
-      });
-      return;
-    }
-
-    // Current tier = highest tier with minPairs <= totalPairs
-    let current = tiers[0];
-    for (const t of tiers) {
-      if (totalPairs >= t.minPairs) current = t;
-      else break;
-    }
-
-    // Next tier = first tier above current totalPairs
-    const next = tiers.find((t) => t.minPairs > totalPairs) || null;
-
-    // Determine current sell price
-    let currentSellPrice = null;
-    if (current.sellPrice !== undefined && current.sellPrice !== null && String(current.sellPrice) !== "") {
-      const sp = Number(asText(current.sellPrice));
-      if (Number.isFinite(sp)) currentSellPrice = sp;
-    }
-
-    if (currentSellPrice === null && Number.isFinite(startPrice)) {
-      currentSellPrice = startPrice * (1 - (current.discount || 0));
-    }
-
-    const updatePayload = {
-      [F.OPP_CURRENT_DISCOUNT]: current.discount || 0,
-      [F.OPP_CURRENT_SELL_PRICE]: currentSellPrice ?? null,
-      [F.OPP_NEXT_MIN_PAIRS]: next ? next.minPairs : null,
-      [F.OPP_NEXT_DISCOUNT]: next ? next.discount : null,
-    };
-
-    await oppsTable.update(oppRecordId, updatePayload);
-  } catch (err) {
-    // Don’t break cart flows if tiers are misconfigured
-    console.warn("⚠️ recalcOpportunityPricing skipped/error:", err?.message || err);
-  }
 }
 
 function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
@@ -598,13 +605,12 @@ function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
   const isSubmitted = status === "Submitted";
   const isHardLocked = HARD_LOCKED_STATUSES.has(status);
 
-  // Size buttons: enabled only when editable
   const rows = [];
   let row = new ActionRowBuilder();
   let inRow = 0;
 
   for (const s of sizes) {
-    if (rows.length === 4) break; // leave last row for controls
+    if (rows.length === 4) break;
     if (inRow === 5) {
       rows.push(row);
       row = new ActionRowBuilder();
@@ -622,10 +628,6 @@ function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
   }
   if (inRow > 0 && rows.length < 4) rows.push(row);
 
-  // Controls row:
-  // - Editable: Review, Submit, Clear
-  // - Submitted: Review, Add More
-  // - Hard locked: Review only (everything else disabled)
   const controls = new ActionRowBuilder();
 
   controls.addComponents(
@@ -667,6 +669,19 @@ function buildSizeButtons(opportunityRecordId, sizes, opts = {}) {
   return rows;
 }
 
+/* =========================
+   Discord Client
+========================= */
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  partials: [Partials.Channel],
+});
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`🤖 Logged in as ${c.user.tag}`);
+});
+
 // Single source of truth for DM panel updates
 async function refreshDmPanel(oppRecordId, commitmentRecordId) {
   const opp = await oppsTable.find(oppRecordId);
@@ -700,19 +715,6 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
 function deferEphemeralIfGuild(inGuild) {
   return inGuild ? { flags: MessageFlags.Ephemeral } : {};
 }
-
-/* =========================
-   Discord Client
-========================= */
-
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-  partials: [Partials.Channel],
-});
-
-client.once(Events.ClientReady, async (c) => {
-  console.log(`🤖 Logged in as ${c.user.tag}`);
-});
 
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
@@ -803,15 +805,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      const fresh = await commitmentsTable.find(commitment.id);
-      const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
-
+      const status = await getCommitmentStatus(commitment.id);
       if (status !== "Submitted") {
         await interaction.editReply("⚠️ Add More is only available after you submit.");
         return;
       }
 
       await touchCommitment(commitment.id, { [F.COM_STATUS]: "Editing" });
+      // totals don’t change here, but we refresh panel
       await refreshDmPanel(oppRecordId, commitment.id);
 
       await interaction.editReply("✅ Editing enabled. Add more sizes and press Submit again to confirm.");
@@ -895,13 +896,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // Increase-only policy in Editing:
-    // - In Draft: allow any change
-    // - In Editing: only allow qty >= existing qty (no decreases/removal)
     if (statusNow === "Editing") {
       const existingQty = await getLineQty(commitment.id, size);
       if (qty < existingQty) {
         await interaction.reply({
-          content: "⚠️ While editing after submission, you can only **increase** quantities. Contact staff to reduce/remove.",
+          content:
+            "⚠️ While editing after submission, you can only **increase** quantities. Contact staff to reduce/remove.",
         });
         return;
       }
@@ -1068,10 +1068,7 @@ app.post("/post-opportunity", async (req, res) => {
 
     const embed = buildOpportunityEmbed(fields);
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`opp_join:${opportunityRecordId}`)
-        .setLabel("Join Bulk")
-        .setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId(`opp_join:${opportunityRecordId}`).setLabel("Join Bulk").setStyle(ButtonStyle.Success)
     );
 
     const channel = await client.channels.fetch(BULK_PUBLIC_CHANNEL_ID);
@@ -1129,16 +1126,53 @@ app.post("/sync-opportunity", async (req, res) => {
     const embed = buildOpportunityEmbed(fields);
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`opp_join:${opportunityRecordId}`)
-        .setLabel("Join Bulk")
-        .setStyle(ButtonStyle.Success)
+      new ButtonBuilder().setCustomId(`opp_join:${opportunityRecordId}`).setLabel("Join Bulk").setStyle(ButtonStyle.Success)
     );
 
     await message.edit({ embeds: [embed], components: [row] });
     return res.json({ ok: true, synced: true });
   } catch (err) {
     console.error("sync-opportunity error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+app.post("/sync-opportunity-dms", async (req, res) => {
+  try {
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const { opportunityRecordId } = req.body || {};
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
+
+    const rows = await commitmentsTable
+      .select({
+        maxRecords: 1000,
+        filterByFormula: `AND(
+          {${F.COM_OPP_RECORD_ID}} = '${escapeForFormula(opportunityRecordId)}',
+          {${F.COM_DM_CHANNEL_ID}} != '',
+          {${F.COM_DM_MESSAGE_ID}} != ''
+        )`,
+      })
+      .all();
+
+    let updated = 0;
+    for (const c of rows) {
+      try {
+        await refreshDmPanel(opportunityRecordId, c.id);
+        updated++;
+      } catch (e) {
+        console.warn("DM sync failed for commitment", c.id, e?.message || e);
+      }
+    }
+
+    return res.json({ ok: true, synced: true, commitments_found: rows.length, dms_updated: updated });
+  } catch (err) {
+    console.error("sync-opportunity-dms error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
