@@ -43,6 +43,11 @@ const {
 
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
+
+  // Discord ops
+  BULK_GUILD_ID, // optional; if omitted we infer from BULK_PUBLIC_CHANNEL_ID
+  SUPPLIER_QUOTES_CHANNEL_ID, // required for /finalize-opportunity quote post
+  STAFF_ROLE_IDS, // optional comma-separated role ids that can access buyer deal channels
 } = process.env;
 
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
@@ -87,6 +92,7 @@ const F = {
   // Buyers
   BUYER_DISCORD_ID: "Discord User ID",
   BUYER_DISCORD_USERNAME: "Discord Username",
+  BUYER_DEFAULT_DEPOSIT_PCT: "Default Deposit %",
 
   // Opportunities
   OPP_PRODUCT_NAME: "Product Name",
@@ -103,6 +109,11 @@ const F = {
   OPP_NEXT_DISCOUNT: "Next Tier Discount %", // store as decimal (0.03) for 3%
   OPP_PICTURE: "Picture",
   OPP_ALLOWED_SIZES: "Allowed Sizes (Generated)",
+  OPP_STATUS: "Status", // Opportunities status (Draft/Open/Closed/Confirmed/Cancelled)
+  OPP_DISCORD_CATEGORY_ID: "Discord Category ID",
+  OPP_QUOTES_MESSAGE_ID: "Discord Quotes Message ID",
+  OPP_DEPOSIT_DUE_AT: "Deposit Due At", // optional datetime field
+  OPP_CLOSE_AT: "Close At", // optional datetime field
 
   // Commitments
   COM_OPPORTUNITY: "Opportunity",
@@ -116,6 +127,8 @@ const F = {
   COM_OPP_RECORD_ID: "Opportunity Record ID", // helper field we set
   COM_COMMITTED_AT: "Committed At", // your Airtable field name
   COM_LAST_ACTION: "Last Action", // optional text field (recommended) for DM feedback
+  COM_DEAL_CHANNEL_ID: "Discord Deal Channel ID",
+  COM_DEAL_MESSAGE_ID: "Discord Deal Message ID",
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -722,7 +735,9 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
         `
 
 **Status:** **${status}**` +
-        "\n\n" +
+        "
+
+" +
         (lastAction ? `
 **Last update:** ${lastAction}` : "")
     )
@@ -753,6 +768,171 @@ function scheduleDeleteInteractionReply(interaction, ms = 2000) {
   }, ms);
 }
 
+function parseCsvIds(v) {
+  return String(v || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function inferGuildId() {
+  if (BULK_GUILD_ID) return String(BULK_GUILD_ID);
+  if (!BULK_PUBLIC_CHANNEL_ID) return null;
+  const ch = await client.channels.fetch(String(BULK_PUBLIC_CHANNEL_ID));
+  return ch?.guildId ? String(ch.guildId) : null;
+}
+
+function safeChannelName(usernameOrTag) {
+  const raw = String(usernameOrTag || "buyer").toLowerCase();
+  const base = raw
+    .replace(/#[0-9]{4}$/g, "")
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 60);
+  return base || "buyer";
+}
+
+async function ensureOppCategory(guild, oppRecordId, oppFields) {
+  const existing = asText(oppFields[F.OPP_DISCORD_CATEGORY_ID]);
+  if (existing) {
+    try {
+      const cat = await guild.channels.fetch(existing);
+      if (cat) return cat;
+    } catch (_) {}
+  }
+
+  const name = (asText(oppFields["Opportunity ID"]) || oppRecordId).slice(0, 90);
+  const cat = await guild.channels.create({
+    name,
+    type: 4, // GuildCategory
+  });
+
+  await oppsTable.update(oppRecordId, { [F.OPP_DISCORD_CATEGORY_ID]: String(cat.id) });
+  return cat;
+}
+
+async function computeCommitmentTotals(commitmentRecordId, oppFields) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}} = '${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  const qtyTotal = rows.reduce((sum, r) => sum + Number(r.fields?.[F.LINE_QTY] || 0), 0);
+
+  const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+  const price = Number(asText(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]));
+  const unitPrice = Number.isFinite(price) ? price : 0;
+  const totalAmount = qtyTotal * unitPrice;
+
+  return { qtyTotal, currency, unitPrice, totalAmount };
+}
+
+async function getBuyerDepositPct(commitmentFields) {
+  const buyerLinks = commitmentFields?.[F.COM_BUYER];
+  const buyerId = Array.isArray(buyerLinks) ? buyerLinks[0] : null;
+  if (!buyerId) return 50; // default if not linked
+
+  try {
+    const b = await buyersTable.find(buyerId);
+    const pct = Number(b.fields?.[F.BUYER_DEFAULT_DEPOSIT_PCT] ?? 50);
+    if (!Number.isFinite(pct)) return 50;
+    return pct;
+  } catch (_) {
+    return 50;
+  }
+}
+
+async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, staffRoleIds, nameSuffix }) {
+  const baseName = safeChannelName(buyerTag) + (nameSuffix ? `-${nameSuffix}` : "");
+  const channelName = baseName.slice(0, 90);
+
+  const overwrites = [
+    { id: guild.roles.everyone.id, deny: [1024] }, // ViewChannel
+    { id: buyerDiscordId, allow: [1024, 2048, 4096] }, // ViewChannel, SendMessages, ReadMessageHistory
+    { id: guild.members.me.id, allow: [1024, 2048, 4096, 8192] }, // plus ManageMessages
+  ];
+
+  for (const rid of staffRoleIds) {
+    overwrites.push({ id: rid, allow: [1024, 2048, 4096, 8192] });
+  }
+
+  const ch = await guild.channels.create({
+    name: channelName,
+    parent: categoryId,
+    type: 0, // GuildText
+    permissionOverwrites: overwrites,
+  });
+
+  return ch;
+}
+
+function formatDepositRequest({ currency, totalAmount, depositPct, depositDueAt }) {
+  const sym = currencySymbol(currency);
+  const amount = totalAmount;
+  const dep = amount * (depositPct / 100);
+  const depStr = `${sym}${dep % 1 === 0 ? dep.toFixed(0) : dep.toFixed(2)}`;
+
+  const due = depositDueAt ? `
+
+⏰ **Deadline:** ${depositDueAt}` : "";
+
+  return `✅ Bulk closed — your commitment is locked.
+
+💳 **Deposit required (${depositPct}%):** **${depStr}**${due}
+
+Please pay the deposit and post a screenshot here.
+A staff member will confirm it.`;
+}
+
+function formatZeroDepositMessage({ depositDueAt }) {
+  const due = depositDueAt ? `
+
+⏰ **Order window ends:** ${depositDueAt}` : "";
+  return `✅ Bulk closed — your commitment is locked.
+
+🎉 **No deposit required for you.** Your pairs will be included in the supplier order.${due}
+
+We’ll communicate updates in this channel.`;
+}
+
+async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText, totalPairs, currency }) {
+  if (!SUPPLIER_QUOTES_CHANNEL_ID) return null;
+
+  const ch = await guild.channels.fetch(String(SUPPLIER_QUOTES_CHANNEL_ID));
+  if (!ch || !ch.isTextBased()) return null;
+
+  const title = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const discount = formatPercent(oppFields[F.OPP_CURRENT_DISCOUNT] ?? 0);
+  const price = formatMoney(currency, oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
+
+  const content = `📦 **SUPPLIER QUOTE**
+**${title}** — ${product}
+
+**Final Tier:** ${discount}
+**Unit Price:** ${price}
+**Confirmed Pairs:** **${totalPairs}**
+
+**Size Breakdown**
+${sizeTotalsText}`;
+
+  const existingMsgId = asText(oppFields[F.OPP_QUOTES_MESSAGE_ID]);
+  if (existingMsgId) {
+    try {
+      const m = await ch.messages.fetch(existingMsgId);
+      await m.edit(content);
+      return m.id;
+    } catch (_) {}
+  }
+
+  const m = await ch.send(content);
+  await oppsTable.update(oppRecordId, { [F.OPP_QUOTES_MESSAGE_ID]: String(m.id) });
+  return m.id;
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
 
@@ -764,6 +944,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       const opp = await oppsTable.find(opportunityRecordId);
       const oppFields = opp.fields || {};
+
+      // Gate by Opportunity status
+      const oppStatus = asText(oppFields[F.OPP_STATUS]) || "";
+      if (oppStatus && oppStatus !== "Open") {
+        await interaction.editReply("⛔ This bulk is closed.");
+        return;
+      }
 
       const buyer = await upsertBuyer(interaction.user);
 
@@ -1243,6 +1430,223 @@ app.post("/sync-opportunity-dms", async (req, res) => {
     return res.json({ ok: true, synced: true, commitments_found: rows.length, dms_updated: updated });
   } catch (err) {
     console.error("sync-opportunity-dms error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Close opportunity: lock commitments, create category + per-buyer deal channels, post deposit requests
+app.post("/close-opportunity", async (req, res) => {
+  try {
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const { opportunityRecordId } = req.body || {};
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
+
+    const guildId = await inferGuildId();
+    if (!guildId) return res.status(500).json({ ok: false, error: "Could not infer guild id" });
+    const guild = await client.guilds.fetch(guildId);
+
+    const opp = await oppsTable.find(opportunityRecordId);
+    const oppFields = opp.fields || {};
+
+    // mark Closed
+    await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
+
+    const category = await ensureOppCategory(guild, opportunityRecordId, oppFields);
+    const staffRoleIds = parseCsvIds(STAFF_ROLE_IDS);
+
+    const commitments = await commitmentsTable
+      .select({
+        maxRecords: 1000,
+        filterByFormula: `{${F.COM_OPP_RECORD_ID}} = '${escapeForFormula(opportunityRecordId)}'`,
+      })
+      .all();
+
+    let locked = 0;
+    let cancelled = 0;
+    let channelsCreated = 0;
+
+    const depositDueAt = asText(oppFields[F.OPP_DEPOSIT_DUE_AT]);
+
+    for (const c of commitments) {
+      const st = asText(c.fields[F.COM_STATUS]) || "";
+      if (st === "Draft") {
+        await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
+        cancelled++;
+        continue;
+      }
+
+      if (st === "Submitted" || st === "Editing") {
+        await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Locked" });
+      }
+
+      const newStatus = st === "Submitted" || st === "Editing" ? "Locked" : st;
+      if (newStatus === "Locked") locked++;
+
+      // Only create deal channels for Locked (i.e., meaningful buyers)
+      if (newStatus !== "Locked") continue;
+
+      const buyerDiscordId = asText(c.fields[F.COM_DISCORD_USER_ID]);
+      const buyerTag = asText(c.fields[F.COM_DISCORD_USER_TAG]) || buyerDiscordId;
+      if (!buyerDiscordId) continue;
+
+      // Skip if deal channel already exists
+      const existingDealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
+      let dealChannel = null;
+      if (existingDealChannelId) {
+        try {
+          dealChannel = await guild.channels.fetch(existingDealChannelId);
+        } catch (_) {}
+      }
+
+      if (!dealChannel) {
+        dealChannel = await ensureDealChannel({
+          guild,
+          categoryId: category.id,
+          buyerDiscordId,
+          buyerTag,
+          staffRoleIds,
+          nameSuffix: opportunityRecordId.slice(-4),
+        });
+        await commitmentsTable.update(c.id, { [F.COM_DEAL_CHANNEL_ID]: String(dealChannel.id) });
+        channelsCreated++;
+      }
+
+      const depositPct = await getBuyerDepositPct(c.fields);
+      const totals = await computeCommitmentTotals(c.id, oppFields);
+
+      const messageText = depositPct <= 0
+        ? formatZeroDepositMessage({ depositDueAt })
+        : formatDepositRequest({
+            currency: totals.currency,
+            totalAmount: totals.totalAmount,
+            depositPct,
+            depositDueAt,
+          });
+
+      const existingDealMsgId = asText(c.fields[F.COM_DEAL_MESSAGE_ID]);
+      if (existingDealMsgId) {
+        try {
+          const m = await dealChannel.messages.fetch(existingDealMsgId);
+          await m.edit(messageText);
+          continue;
+        } catch (_) {}
+      }
+
+      const m = await dealChannel.send(messageText);
+      await commitmentsTable.update(c.id, { [F.COM_DEAL_MESSAGE_ID]: String(m.id) });
+    }
+
+    return res.json({ ok: true, closed: true, locked, cancelled, channelsCreated });
+  } catch (err) {
+    console.error("close-opportunity error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+// Finalize opportunity: cancel unpaid, post per-buyer final status, post supplier quote
+app.post("/finalize-opportunity", async (req, res) => {
+  try {
+    const incomingSecret = req.header("x-post-secret") || "";
+    if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
+      return res.status(401).json({ ok: false, error: "Unauthorized" });
+    }
+
+    const { opportunityRecordId } = req.body || {};
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
+
+    const guildId = await inferGuildId();
+    if (!guildId) return res.status(500).json({ ok: false, error: "Could not infer guild id" });
+    const guild = await client.guilds.fetch(guildId);
+
+    const opp = await oppsTable.find(opportunityRecordId);
+    const oppFields = opp.fields || {};
+
+    const commitments = await commitmentsTable
+      .select({
+        maxRecords: 1000,
+        filterByFormula: `{${F.COM_OPP_RECORD_ID}} = '${escapeForFormula(opportunityRecordId)}'`,
+      })
+      .all();
+
+    const eligibleCommitmentIds = [];
+    let cancelled = 0;
+
+    for (const c of commitments) {
+      const st = asText(c.fields[F.COM_STATUS]) || "";
+      const depositPct = await getBuyerDepositPct(c.fields);
+
+      const isEligible = st === "Deposit Paid" || (depositPct <= 0 && st === "Locked") || st === "Paid";
+
+      if (isEligible) {
+        eligibleCommitmentIds.push(c.id);
+      } else if (st === "Locked" && depositPct > 0) {
+        await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
+        cancelled++;
+      }
+    }
+
+    // Build size totals from eligible commitments
+    const sizeTotals = new Map();
+    const chunkSize = 25;
+
+    for (let i = 0; i < eligibleCommitmentIds.length; i += chunkSize) {
+      const chunk = eligibleCommitmentIds.slice(i, i + chunkSize);
+      const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
+      const lines = await linesTable
+        .select({ filterByFormula: `${orChunk}`, maxRecords: 1000 })
+        .all();
+
+      for (const line of lines) {
+        const size = asText(line.fields[F.LINE_SIZE]);
+        const qty = Number(line.fields[F.LINE_QTY] || 0);
+        if (!size || !Number.isFinite(qty) || qty <= 0) continue;
+        sizeTotals.set(size, (sizeTotals.get(size) || 0) + qty);
+      }
+    }
+
+    const sortedSizes = Array.from(sizeTotals.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+    const sizeTotalsText = sortedSizes.map(([s, q]) => `• ${s}: ${q}`).join("
+") || "(none)";
+    const totalPairs = sortedSizes.reduce((sum, [, q]) => sum + q, 0);
+    const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+
+    // Post supplier quote to staff channel
+    await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
+
+    // Post final status in each buyer deal channel
+    for (const c of commitments) {
+      const dealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
+      if (!dealChannelId) continue;
+
+      const st = asText(c.fields[F.COM_STATUS]) || "";
+      const depositPct = await getBuyerDepositPct(c.fields);
+      const eligible = st === "Deposit Paid" || (depositPct <= 0 && st === "Locked") || st === "Paid";
+
+      try {
+        const ch = await guild.channels.fetch(dealChannelId);
+        if (!ch || !ch.isTextBased()) continue;
+        if (eligible) {
+          await ch.send("✅ Included in supplier order. We will update you here once we have tracking / ETA.");
+        } else if (st === "Cancelled") {
+          await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
+        }
+      } catch (_) {}
+    }
+
+    // Mark opportunity confirmed
+    await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Confirmed" });
+
+    return res.json({ ok: true, finalized: true, eligible: eligibleCommitmentIds.length, cancelled });
+  } catch (err) {
+    console.error("finalize-opportunity error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
