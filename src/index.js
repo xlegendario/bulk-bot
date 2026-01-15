@@ -1541,28 +1541,39 @@ app.post("/close-opportunity", async (req, res) => {
   }
 });
 
-async function createConfirmedBulkLinks({
-  opportunityRecordId,
-  eligibleCommitmentRecords, // Airtable commitment records
-}) {
+async function findConfirmedBulkByOpportunity(opportunityRecordId) {
+  const rows = await confirmedBulksTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `FIND('${escapeForFormula(opportunityRecordId)}', ARRAYJOIN({${F.CB_LINKED_OPPORTUNITY}}, ',')) > 0`,
+    })
+    .firstPage();
+
+  return rows.length ? rows[0] : null;
+}
+
+async function createConfirmedBulkLinks({ opportunityRecordId, eligibleCommitmentRecords }) {
   const linkedCommitmentIds = eligibleCommitmentRecords.map((r) => r.id);
 
-  // Collect buyer record IDs from linked field on each commitment
   const buyerIds = new Set();
   for (const r of eligibleCommitmentRecords) {
     const links = r.fields?.[F.COM_BUYER];
-    if (Array.isArray(links)) {
-      for (const id of links) buyerIds.add(id);
-    }
+    if (Array.isArray(links)) for (const id of links) buyerIds.add(id);
   }
 
-  // Create ONE confirmed bulks record
-  return await confirmedBulksTable.create({
+  const payload = {
     [F.CB_LINKED_OPPORTUNITY]: [opportunityRecordId],
     [F.CB_LINKED_COMMITMENTS]: linkedCommitmentIds,
     [F.CB_LINKED_BUYERS]: Array.from(buyerIds),
-  });
+  };
+
+  const existing = await findConfirmedBulkByOpportunity(opportunityRecordId);
+  if (existing) {
+    return await confirmedBulksTable.update(existing.id, payload);
+  }
+  return await confirmedBulksTable.create(payload);
 }
+
 
 
 app.post("/finalize-opportunity", async (req, res) => {
