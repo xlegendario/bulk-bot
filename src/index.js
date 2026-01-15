@@ -122,7 +122,7 @@ const F = {
   OPP_DEPOSIT_DUE_AT: "Deposit Due At",
 
   // New: supplier + final snapshot fields
-  OPP_SUPPLIER_UNIT_PRICE: "Supplier Unit Price",
+  OPP_SUPPLIER_UNIT_PRICE: "Supplier Price",
   OPP_FINAL_TOTAL_PAIRS: "Final Total Pairs",
   OPP_FINAL_SELL_PRICE: "Final Sell Price",
   OPP_FINAL_DISCOUNT_PCT: "Final Discount %",
