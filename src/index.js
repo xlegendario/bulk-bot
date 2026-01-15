@@ -1613,7 +1613,9 @@ app.post("/finalize-opportunity", async (req, res) => {
     }
 
     const sortedSizes = Array.from(sizeTotals.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-    const sizeTotalsText = sortedSizes.map(([s, q]) => `• ${s}: ${q}`).join("
+    const sizeTotalsText = sortedSizes
+      .map(([s, q]) => `• ${s}: ${q}`)
+      .join("
 ") || "(none)";
     const totalPairs = sortedSizes.reduce((sum, [, q]) => sum + q, 0);
     const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
