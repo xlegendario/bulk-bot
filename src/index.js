@@ -908,10 +908,18 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
   const title = asText(oppFields["Opportunity ID"]) || oppRecordId;
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
 
-  const supplierUnit = Number(asText(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]));
-  const supplierUnitStr = Number.isFinite(supplierUnit) ? formatMoney(currency, supplierUnit) : "—";
-  const supplierTotal = Number.isFinite(supplierUnit) ? supplierUnit * totalPairs : null;
-  const supplierTotalStr = Number.isFinite(supplierTotal) ? formatMoney(currency, supplierTotal) : "—";
+  const rawSupplier = asText(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]).trim();
+  const supplierUnit = rawSupplier === "" ? null : Number(rawSupplier);
+
+  const supplierUnitStr = supplierUnit === null || Number.isNaN(supplierUnit)
+    ? "—"
+    : formatMoney(currency, supplierUnit);
+
+  const supplierTotal = supplierUnit === null || Number.isNaN(supplierUnit)
+    ? null
+    : supplierUnit * totalPairs;
+
+  const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
 
   const content =
     `📦 **SUPPLIER QUOTE (BUY)**${NL}` +
@@ -948,11 +956,15 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
   const sellUnit = formatMoney(currency, oppFields[F.OPP_FINAL_SELL_PRICE]);
   const discount = formatPercent(oppFields[F.OPP_FINAL_DISCOUNT_PCT]);
 
+  const sellUnitRaw = Number(asText(oppFields[F.OPP_FINAL_SELL_PRICE]));
+  const totalSell = Number.isFinite(sellUnitRaw) ? sellUnitRaw * totalPairs : null;
+  const totalSellStr = totalSell === null ? "—" : formatMoney(currency, totalSell);
+
   const text =
     `✅ **CONFIRMED BULK (SELL)**${NL}` +
     `**${title}** — ${product}${NL}${NL}` +
     `**Final Total Pairs:** **${totalPairs}**${NL}` +
-    `**Final Sell Price:** ${sellUnit}${NL}` +
+    `**Final Sell Price:** ${sellUnit}${NL}**Total Sell:** ${totalSellStr}${NL}` +
     `**Final Discount:** ${discount}${NL}${NL}` +
     `**Sizes**${NL}${sizeTotalsText}`;
 
@@ -1081,6 +1093,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await touchCommitment(commitment.id, { [F.COM_STATUS]: "Editing", [F.COM_LAST_ACTION]: "Editing" });
       await refreshDmPanel(oppRecordId, commitment.id);
 
+      // Avoid DM clutter
+      if (!interaction.guildId) {
+        await interaction.deleteReply().catch(() => {});
+        return;
+      }
       await interaction.editReply("✅ Editing enabled. Add more sizes and press Submit again to confirm.");
       return;
     } catch (err) {
@@ -1186,6 +1203,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await touchCommitment(commitment.id, { [F.COM_STATUS]: "Draft", [F.COM_LAST_ACTION]: "Cleared cart" });
       await refreshDmPanel(oppRecordId, commitment.id);
 
+      // Avoid DM clutter
+      if (!interaction.guildId) {
+        await interaction.deleteReply().catch(() => {});
+        return;
+      }
       await interaction.editReply("🧹 Cleared.");
       return;
     } catch (err) {
@@ -1223,6 +1245,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await recalcOpportunityTotals(oppRecordId);
       await refreshDmPanel(oppRecordId, commitment.id);
 
+      // Avoid DM clutter: delete interaction reply in DMs (panel shows status/last update)
+      if (!interaction.guildId) {
+        await interaction.deleteReply().catch(() => {});
+        return;
+      }
       await interaction.editReply("✅ Submitted.");
       return;
     } catch (err) {
@@ -1403,6 +1430,7 @@ app.post("/close-opportunity", async (req, res) => {
 
     let locked = 0;
     let cancelled = 0;
+    const cancelledIds = new Set();
     let channelsCreated = 0;
 
     for (const c of commitments) {
@@ -1410,6 +1438,7 @@ app.post("/close-opportunity", async (req, res) => {
 
       if (st === "Draft") {
         await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
+        cancelledIds.add(c.id);
         cancelled++;
         continue;
       }
@@ -1575,8 +1604,27 @@ app.post("/finalize-opportunity", async (req, res) => {
         if (!ch || !ch.isTextBased()) continue;
         if (eligible) {
           await ch.send("✅ Included in supplier order. We will update you here once we have tracking / ETA.");
-        } else if (st === "Cancelled") {
-          await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
+        } else {
+          const isCancelled = cancelledIds.has(c.id) || st === "Cancelled";
+          if (isCancelled) {
+            await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
+
+            // Disable the deposit button on the original deal message (if present)
+            const dealMsgId = asText(c.fields[F.COM_DEAL_MESSAGE_ID]);
+            if (dealMsgId) {
+              try {
+                const m = await ch.messages.fetch(dealMsgId);
+                const row = new ActionRowBuilder().addComponents(
+                  new ButtonBuilder()
+                    .setCustomId(`deposit_confirm:${c.id}`)
+                    .setLabel("Cancelled")
+                    .setStyle(ButtonStyle.Danger)
+                    .setDisabled(true)
+                );
+                await m.edit({ components: [row] });
+              } catch (_) {}
+            }
+          }
         }
       } catch {}
     }
