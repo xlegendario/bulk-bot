@@ -30,7 +30,7 @@ process.on("unhandledRejection", (err) => {
   console.error("Unhandled promise rejection:", err);
 });
 
-const NL = "\\n";
+const NL = "\n";
 
 /* =========================
    ENV
@@ -1592,33 +1592,6 @@ app.post("/finalize-opportunity", async (req, res) => {
   }
 });
 
-/* =========================
-   EXPRESS SETUP
-========================= */
-
-const app = express();
-app.use(morgan("tiny"));
-app.use(express.json());
-
-function assertSecret(req, res) {
-  const incomingSecret = req.header("x-post-secret") || "";
-  if (!POST_OPP_SECRET || incomingSecret !== POST_OPP_SECRET) {
-    res.status(401).json({ ok: false, error: "Unauthorized" });
-    return false;
-  }
-  return true;
-}
-
-app.get("/", (_req, res) => res.send("Bulk bot is live ✅"));
-
-app.get("/airtable-test", async (_req, res) => {
-  try {
-    const records = await buyersTable.select({ maxRecords: 1 }).firstPage();
-    res.json({ ok: true, buyers_records_found: records.length });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
 
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
 
