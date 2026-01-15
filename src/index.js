@@ -46,6 +46,7 @@ const {
   AIRTABLE_COMMITMENTS_TABLE = "Commitments",
   AIRTABLE_LINES_TABLE = "Commitment Lines",
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
+  AIRTABLE_CONFIRMED_BULKS_TABLE = "Confirmed Bulks",
 
   // Tier engine tables
   AIRTABLE_TIER_RULES_TABLE = "Tier Rules",
@@ -88,6 +89,7 @@ const linesTable = base(AIRTABLE_LINES_TABLE);
 const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
 const tierRulesTable = base(AIRTABLE_TIER_RULES_TABLE);
 const tierRuleSetsTable = base(AIRTABLE_TIER_RULE_SETS_TABLE);
+const confirmedBulksTable = base(AIRTABLE_CONFIRMED_BULKS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 
@@ -160,6 +162,12 @@ const F = {
   // Tier rule sets
   TRS_OPPORTUNITIES: "Opportunities",
   TRS_TIER_RULES: "Tier Rules",
+
+  // Confirmed Bulks
+  CB_LINKED_OPPORTUNITY: "Linked Opportunity",
+  CB_LINKED_COMMITMENTS: "Linked Commitments",
+  CB_LINKED_BUYERS: "Linked Buyers",
+  
 };
 
 /* =========================
@@ -176,7 +184,7 @@ const COUNTED_STATUSES = new Set(["Submitted", "Locked", "Deposit Paid", "Paid"]
    HELPERS
 ========================= */
 
-const escapeForFormula = (s) => String(s ?? "").replace(/'/g, "\'");
+const escapeForFormula = (s) => String(s ?? "").replace(/'/g, "\\'");
 
 function parseCsvIds(v) {
   return String(v || "")
@@ -277,6 +285,8 @@ function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
   const end = Math.max(i1, i2);
   return ladder.slice(start, end + 1);
 }
+
+
 
 function buildOrFormula(fieldName, values) {
   const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
@@ -1531,6 +1541,30 @@ app.post("/close-opportunity", async (req, res) => {
   }
 });
 
+async function createConfirmedBulkLinks({
+  opportunityRecordId,
+  eligibleCommitmentRecords, // Airtable commitment records
+}) {
+  const linkedCommitmentIds = eligibleCommitmentRecords.map((r) => r.id);
+
+  // Collect buyer record IDs from linked field on each commitment
+  const buyerIds = new Set();
+  for (const r of eligibleCommitmentRecords) {
+    const links = r.fields?.[F.COM_BUYER];
+    if (Array.isArray(links)) {
+      for (const id of links) buyerIds.add(id);
+    }
+  }
+
+  // Create ONE confirmed bulks record
+  return await confirmedBulksTable.create({
+    [F.CB_LINKED_OPPORTUNITY]: [opportunityRecordId],
+    [F.CB_LINKED_COMMITMENTS]: linkedCommitmentIds,
+    [F.CB_LINKED_BUYERS]: Array.from(buyerIds),
+  });
+}
+
+
 app.post("/finalize-opportunity", async (req, res) => {
   try {
     if (!assertSecret(req, res)) return;
@@ -1606,6 +1640,19 @@ app.post("/finalize-opportunity", async (req, res) => {
     // Post supplier quote (buy) and confirmed bulks summary (sell)
     await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
     await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
+
+    // Create Confirmed Bulks links record
+    try {
+      const eligibleRecords = commitments.filter((c) => eligibleCommitmentIds.includes(c.id));
+      if (eligibleRecords.length) {
+        await createConfirmedBulkLinks({
+          opportunityRecordId,
+          eligibleCommitmentRecords: eligibleRecords,
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Confirmed Bulks linking failed:", e?.message || e);
+    }
 
     // Notify buyers
     for (const c of commitments) {
