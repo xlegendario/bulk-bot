@@ -1,6 +1,7 @@
 // FULL PRODUCTION SCRIPT (stable)
 // Includes: public post+sync, DM cart builder, counted quantity snapshot, tier engine (Rule Sets+Rules),
 // close/finalize with per-buyer deal channels, staff deposit confirm button, supplier quote + confirmed bulks summary.
+// NEW: Confirmed Bulks linking (creates/updates a record in the Confirmed Bulks table that links back to the Opportunity)
 
 import "dotenv/config";
 import express from "express";
@@ -51,6 +52,9 @@ const {
   AIRTABLE_TIER_RULES_TABLE = "Tier Rules",
   AIRTABLE_TIER_RULE_SETS_TABLE = "Tier Rule Sets",
 
+  // NEW: Confirmed Bulks table
+  AIRTABLE_CONFIRMED_BULKS_TABLE = "Confirmed Bulks",
+
   BULK_PUBLIC_CHANNEL_ID,
   POST_OPP_SECRET,
 
@@ -88,6 +92,9 @@ const linesTable = base(AIRTABLE_LINES_TABLE);
 const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
 const tierRulesTable = base(AIRTABLE_TIER_RULES_TABLE);
 const tierRuleSetsTable = base(AIRTABLE_TIER_RULE_SETS_TABLE);
+
+// NEW: Confirmed Bulks table handle
+const confirmedBulksTable = base(AIRTABLE_CONFIRMED_BULKS_TABLE);
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 
@@ -160,6 +167,22 @@ const F = {
   // Tier rule sets
   TRS_OPPORTUNITIES: "Opportunities",
   TRS_TIER_RULES: "Tier Rules",
+
+  // NEW: Confirmed Bulks
+  // MUST exist (link field in Confirmed Bulks table)
+  CB_LINKED_OPPORTUNITY: "Linked Opportunity",
+
+  // Optional (safe if they exist; ignored if not found)
+  CB_OPPORTUNITY_ID: "Opportunity ID",
+  CB_PRODUCT_NAME: "Product Name",
+  CB_SKU: "SKU",
+  CB_CURRENCY: "Currency",
+  CB_FINAL_TOTAL_PAIRS: "Final Total Pairs",
+  CB_FINAL_SELL_PRICE: "Final Sell Price",
+  CB_FINAL_DISCOUNT_PCT: "Final Discount %",
+  CB_SIZE_BREAKDOWN: "Size Breakdown",
+  CB_SUPPLIER_UNIT_PRICE: "Supplier Price",
+  CB_CONFIRMED_AT: "Confirmed At",
 };
 
 /* =========================
@@ -176,7 +199,7 @@ const COUNTED_STATUSES = new Set(["Submitted", "Locked", "Deposit Paid", "Paid"]
    HELPERS
 ========================= */
 
-const escapeForFormula = (s) => String(s ?? "").replace(/'/g, "\'");
+const escapeForFormula = (s) => String(s ?? "").replace(/'/g, "\\'");
 
 function parseCsvIds(v) {
   return String(v || "")
@@ -302,6 +325,92 @@ function deferEphemeralIfGuild(inGuild) {
 
 function scheduleDeleteInteractionReply(interaction, ms = 2000) {
   setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
+}
+
+/* =========================
+   NEW: CONFIRMED BULKS LINKING
+========================= */
+
+// Helper: only include fields that actually exist in the target table.
+async function safeCreateOrUpdateRecord(table, recordIdOrNull, fields) {
+  // Airtable throws UNKNOWN_FIELD_NAME if we send fields that don't exist.
+  // We'll retry by removing the unknown field until it succeeds.
+  let payload = { ...fields };
+
+  while (true) {
+    try {
+      if (recordIdOrNull) {
+        return await table.update(recordIdOrNull, payload);
+      }
+      return await table.create(payload);
+    } catch (err) {
+      const code = String(err?.error || err?.code || "");
+      if (code !== "UNKNOWN_FIELD_NAME") throw err;
+
+      // Airtable sometimes includes the field name in the message.
+      const msg = String(err?.message || err);
+      const m = msg.match(/Unknown field name: (.+)$/i) || msg.match(/UNKNOWN_FIELD_NAME\s*:?\s*(.+)$/i);
+      const unknown = m?.[1]?.trim()?.replace(/^"|"$/g, "");
+
+      if (unknown && payload[unknown] !== undefined) {
+        delete payload[unknown];
+        continue;
+      }
+
+      // If we can't identify it, fail loudly (better than looping).
+      throw err;
+    }
+  }
+}
+
+async function findConfirmedBulkByOpportunity(oppRecordId) {
+  // Finds the first Confirmed Bulks record that links to this Opportunity.
+  // Requires the link field to be called exactly F.CB_LINKED_OPPORTUNITY.
+  const rows = await confirmedBulksTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `FIND('${escapeForFormula(oppRecordId)}', ARRAYJOIN({${F.CB_LINKED_OPPORTUNITY}})) > 0`,
+    })
+    .firstPage();
+
+  return rows.length ? rows[0] : null;
+}
+
+function buildConfirmedBulkFields({ oppRecordId, oppFields, totalPairs, sizeTotalsText, currency }) {
+  const oppHumanId = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "";
+  const sku = (asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "").trim();
+
+  const finalSell = parseMoneyNumber(oppFields[F.OPP_FINAL_SELL_PRICE] ?? oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
+  const finalDisc = normalizeDiscountPctToDecimal(oppFields[F.OPP_FINAL_DISCOUNT_PCT] ?? oppFields[F.OPP_CURRENT_DISCOUNT] ?? 0);
+  const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
+
+  return {
+    // MUST exist
+    [F.CB_LINKED_OPPORTUNITY]: [oppRecordId],
+
+    // Optional (we will automatically strip unknown fields on create/update)
+    [F.CB_OPPORTUNITY_ID]: oppHumanId,
+    [F.CB_PRODUCT_NAME]: product,
+    [F.CB_SKU]: sku,
+    [F.CB_CURRENCY]: currency,
+    [F.CB_FINAL_TOTAL_PAIRS]: Number(totalPairs || 0),
+    [F.CB_FINAL_SELL_PRICE]: Number.isFinite(finalSell) ? finalSell : null,
+    [F.CB_FINAL_DISCOUNT_PCT]: finalDisc,
+    [F.CB_SIZE_BREAKDOWN]: sizeTotalsText,
+    [F.CB_SUPPLIER_UNIT_PRICE]: Number.isFinite(supplierUnit) ? supplierUnit : null,
+    [F.CB_CONFIRMED_AT]: new Date().toISOString(),
+  };
+}
+
+// This is the function name you referenced in your notes.
+async function createConfirmedBulkRecord({ oppRecordId, oppFields, totalPairs, sizeTotalsText, currency }) {
+  const existing = await findConfirmedBulkByOpportunity(oppRecordId).catch(() => null);
+  const fields = buildConfirmedBulkFields({ oppRecordId, oppFields, totalPairs, sizeTotalsText, currency });
+
+  // Upsert behavior (update if exists, else create)
+  const rec = await safeCreateOrUpdateRecord(confirmedBulksTable, existing?.id || null, fields);
+  return rec;
 }
 
 /* =========================
@@ -710,7 +819,11 @@ function buildCartEmbed(linesText, status, lastAction) {
 
 function buildJoinRow(opportunityRecordId, disabled, label) {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`opp_join:${opportunityRecordId}`).setLabel(label).setStyle(ButtonStyle.Success).setDisabled(!!disabled)
+    new ButtonBuilder()
+      .setCustomId(`opp_join:${opportunityRecordId}`)
+      .setLabel(label)
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!!disabled)
   );
 }
 
@@ -732,7 +845,11 @@ function buildSizeButtons(opportunityRecordId, sizes, status) {
     }
 
     row.addComponents(
-      new ButtonBuilder().setCustomId(`size_pick:${opportunityRecordId}:${sizeKeyEncode(s)}`).setLabel(s).setStyle(ButtonStyle.Secondary).setDisabled(!isEditable)
+      new ButtonBuilder()
+        .setCustomId(`size_pick:${opportunityRecordId}:${sizeKeyEncode(s)}`)
+        .setLabel(s)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(!isEditable)
     );
     inRow++;
   }
@@ -903,9 +1020,7 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
     `**Your commitment:**${NL}${commitmentLinesText}${NL}${NL}` +
     `**Unit price:** ${unitStr}${NL}` +
     `**Total:** ${totalStr}${NL}${NL}` +
-    (depositPct <= 0
-      ? `✅ **No deposit required for you.**${NL}`
-      : `💳 **Deposit required (${depositPct}%):** **${depStr}**${NL}`) +
+    (depositPct <= 0 ? `✅ **No deposit required for you.**${NL}` : `💳 **Deposit required (${depositPct}%):** **${depStr}**${NL}`) +
     (depositDueAt ? `${NL}⏰ **Deadline:** ${depositDueAt}${NL}` : "");
 
   return new EmbedBuilder().setTitle("📌 Bulk Payment / Confirmation").setDescription(desc).setColor(0xffd300);
@@ -928,13 +1043,9 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
 
   const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
 
-  const supplierUnitStr = supplierUnit === null || Number.isNaN(supplierUnit)
-    ? "—"
-    : formatMoney(currency, supplierUnit);
+  const supplierUnitStr = supplierUnit === null || Number.isNaN(supplierUnit) ? "—" : formatMoney(currency, supplierUnit);
 
-  const supplierTotal = supplierUnit === null || Number.isNaN(supplierUnit)
-    ? null
-    : supplierUnit * totalPairs;
+  const supplierTotal = supplierUnit === null || Number.isNaN(supplierUnit) ? null : supplierUnit * totalPairs;
 
   const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
 
@@ -1607,6 +1718,13 @@ app.post("/finalize-opportunity", async (req, res) => {
     await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
     await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
 
+    // NEW: Create/update Confirmed Bulks record linked to Opportunity
+    try {
+      await createConfirmedBulkRecord({ oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
+    } catch (e) {
+      console.warn("⚠️ createConfirmedBulkRecord failed:", e?.message || e);
+    }
+
     // Notify buyers
     for (const c of commitments) {
       const dealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
@@ -1622,8 +1740,7 @@ app.post("/finalize-opportunity", async (req, res) => {
 
       const stFresh = asText(freshC.fields[F.COM_STATUS]) || "";
       const depositPctFresh = await getBuyerDepositPct(freshC.fields);
-      const eligibleFresh =
-        stFresh === "Deposit Paid" || stFresh === "Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
+      const eligibleFresh = stFresh === "Deposit Paid" || stFresh === "Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
 
       try {
         const ch = await guild.channels.fetch(dealChannelId);
@@ -1643,11 +1760,7 @@ app.post("/finalize-opportunity", async (req, res) => {
             try {
               const m = await ch.messages.fetch(dealMsgId);
               const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                  .setCustomId(`deposit_confirm:${c.id}`)
-                  .setLabel("Cancelled")
-                  .setStyle(ButtonStyle.Danger)
-                  .setDisabled(true)
+                new ButtonBuilder().setCustomId(`deposit_confirm:${c.id}`).setLabel("Cancelled").setStyle(ButtonStyle.Danger).setDisabled(true)
               );
               await m.edit({ components: [row] });
             } catch (_) {}
@@ -1666,7 +1779,6 @@ app.post("/finalize-opportunity", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-
 
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
 
