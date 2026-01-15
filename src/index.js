@@ -30,8 +30,7 @@ process.on("unhandledRejection", (err) => {
   console.error("Unhandled promise rejection:", err);
 });
 
-const NL = "
-";
+const NL = "\\n";
 
 /* =========================
    ENV
