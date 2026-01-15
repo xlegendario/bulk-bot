@@ -209,6 +209,24 @@ function formatMoney(code, value) {
   return `${sym}${formatted}`;
 }
 
+function parseMoneyNumber(v) {
+  // Handles Airtable currency fields that may come through as "€173,25" or "173.25" or "173,25".
+  const raw = asText(v).trim();
+  if (!raw) return null;
+  // Keep digits, comma, dot, minus
+  const cleaned = raw.replace(/[^0-9,.-]/g, "");
+  if (!cleaned) return null;
+  // If both comma and dot exist, assume dot is thousands separator and comma is decimal.
+  let normalized = cleaned;
+  if (cleaned.includes(",") && cleaned.includes(".")) {
+    normalized = cleaned.replace(/\./g, "").replace(/,/g, ".");
+  } else if (cleaned.includes(",") && !cleaned.includes(".")) {
+    normalized = cleaned.replace(/,/g, ".");
+  }
+  const num = Number(normalized);
+  return Number.isFinite(num) ? num : null;
+}
+
 function formatPercent(v) {
   const raw = asText(v);
   if (raw === "") return "—";
@@ -908,8 +926,7 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
   const title = asText(oppFields["Opportunity ID"]) || oppRecordId;
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
 
-  const rawSupplier = asText(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]).trim();
-  const supplierUnit = rawSupplier === "" ? null : Number(rawSupplier);
+  const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
 
   const supplierUnitStr = supplierUnit === null || Number.isNaN(supplierUnit)
     ? "—"
@@ -1574,7 +1591,7 @@ app.post("/finalize-opportunity", async (req, res) => {
     const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
 
     // Snapshot final fields in Airtable
-    const finalSellPrice = Number(asText(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]));
+    const finalSellPrice = parseMoneyNumber(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
     await oppsTable.update(opportunityRecordId, {
       [F.OPP_FINAL_TOTAL_PAIRS]: totalPairs,
       [F.OPP_FINAL_SELL_PRICE]: Number.isFinite(finalSellPrice) ? finalSellPrice : null,
@@ -1595,38 +1612,48 @@ app.post("/finalize-opportunity", async (req, res) => {
       const dealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
       if (!dealChannelId) continue;
 
-      const st = asText(c.fields[F.COM_STATUS]) || "";
-      const depositPct = await getBuyerDepositPct(c.fields);
-      const eligible = st === "Deposit Paid" || st === "Paid" || (depositPct <= 0 && st === "Locked");
+      // Re-fetch status so cancellations made earlier are reflected
+      let freshC;
+      try {
+        freshC = await commitmentsTable.find(c.id);
+      } catch {
+        freshC = c;
+      }
+
+      const stFresh = asText(freshC.fields[F.COM_STATUS]) || "";
+      const depositPctFresh = await getBuyerDepositPct(freshC.fields);
+      const eligibleFresh =
+        stFresh === "Deposit Paid" || stFresh === "Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
 
       try {
         const ch = await guild.channels.fetch(dealChannelId);
         if (!ch || !ch.isTextBased()) continue;
-        if (eligible) {
-          await ch.send("✅ Included in supplier order. We will update you here once we have tracking / ETA.");
-        } else {
-          const isCancelled = cancelledIds.has(c.id) || st === "Cancelled";
-          if (isCancelled) {
-            await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
 
-            // Disable the deposit button on the original deal message (if present)
-            const dealMsgId = asText(c.fields[F.COM_DEAL_MESSAGE_ID]);
-            if (dealMsgId) {
-              try {
-                const m = await ch.messages.fetch(dealMsgId);
-                const row = new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setCustomId(`deposit_confirm:${c.id}`)
-                    .setLabel("Cancelled")
-                    .setStyle(ButtonStyle.Danger)
-                    .setDisabled(true)
-                );
-                await m.edit({ components: [row] });
-              } catch (_) {}
-            }
+        if (eligibleFresh) {
+          await ch.send("✅ Included in supplier order. We will update you here once we have tracking / ETA.");
+          continue;
+        }
+
+        if (stFresh === "Cancelled") {
+          await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
+
+          // Disable the deposit button on the original deal message (if present)
+          const dealMsgId = asText(freshC.fields[F.COM_DEAL_MESSAGE_ID]);
+          if (dealMsgId) {
+            try {
+              const m = await ch.messages.fetch(dealMsgId);
+              const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                  .setCustomId(`deposit_confirm:${c.id}`)
+                  .setLabel("Cancelled")
+                  .setStyle(ButtonStyle.Danger)
+                  .setDisabled(true)
+              );
+              await m.edit({ components: [row] });
+            } catch (_) {}
           }
         }
-      } catch {}
+      } catch (_) {}
     }
 
     // auto-sync public + DMs
