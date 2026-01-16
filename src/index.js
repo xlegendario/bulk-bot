@@ -856,7 +856,7 @@ function buildOpportunityEmbed(fields) {
     `**MOQ for Next Tier:** **${nextMinPairs}**`,
     `**Next Tier Discount:** **${nextDiscount}**`,
     "",
-    `**Closes In:** **${closeCountdown}**`,
+    `**Closes:** **${closeCountdown}**`,
   ].join(NL);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
@@ -1107,7 +1107,7 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
     (depositPct <= 0
       ? `✅ **No deposit required for you.**${NL}`
       : `💳 **Deposit required (${depositPct}%):** **${depStr}**${NL}`) +
-    `${NL}⏳ **Deposit Closes In:** **${finalizedCountdown}**${NL}`;
+    `${NL}⏳ **Deposit Closes:** **${finalizedCountdown}**${NL}`;
 
   return new EmbedBuilder().setTitle("📌 Bulk Payment / Confirmation").setDescription(desc).setColor(0xffd300);
 }
