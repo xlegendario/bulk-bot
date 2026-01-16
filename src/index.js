@@ -127,6 +127,8 @@ const F = {
   OPP_QUOTES_MESSAGE_ID: "Discord Quotes Message ID",
   OPP_DEPOSIT_DUE_AT: "Deposit Due At",
   OPP_SUPPLIER_LINK: "Supplier", // linked field on Opportunities
+  OPP_CLOSE_AT: "Close At",
+  OPP_FINALIZED_AT: "Finalized At",
 
   // New: supplier + final snapshot fields
   OPP_SUPPLIER_UNIT_PRICE: "Supplier Price",
@@ -228,6 +230,22 @@ const REQ = {
   QTY: "req_qty",
   PRICE: "req_price",
 };
+
+function toUnixSecondsFromAirtableDate(v) {
+  const s = asText(v).trim();
+  if (!s) return null;
+
+  const d = new Date(s);
+  const ms = d.getTime();
+  if (!Number.isFinite(ms)) return null;
+
+  return Math.floor(ms / 1000);
+}
+
+function fmtDiscordRelative(unixSeconds) {
+  if (!unixSeconds) return "—";
+  return `<t:${unixSeconds}:R>`; // e.g. "in 2 hours"
+}
 
 function normalizeSku(s) {
   return String(s || "").trim().toLowerCase();
@@ -824,6 +842,8 @@ function buildOpportunityEmbed(fields) {
   const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
   const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]) || "—";
   const picUrl = getAirtableAttachmentUrl(fields[F.OPP_PICTURE]);
+  const closeAtUnix = toUnixSecondsFromAirtableDate(fields[F.OPP_CLOSE_AT]);
+  const closeCountdown = fmtDiscordRelative(closeAtUnix);
 
   const desc = [
     `**SKU:** \`${sku}\``,
@@ -835,6 +855,8 @@ function buildOpportunityEmbed(fields) {
     "",
     `**MOQ for Next Tier:** **${nextMinPairs}**`,
     `**Next Tier Discount:** **${nextDiscount}**`,
+    "",
+    `**Closes In:** **${closeCountdown}**`,
   ].join(NL);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
@@ -1062,9 +1084,12 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
   });
 }
 
-function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct, depositDueAt }) {
+function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct }) {
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk";
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+  
+  const finalizedAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
+  const finalizedCountdown = fmtDiscordRelative(finalizedAtUnix);
 
   const sym = currencySymbol(currency);
   const unitStr = `${sym}${unitPrice % 1 === 0 ? unitPrice.toFixed(0) : unitPrice.toFixed(2)}`;
@@ -1082,7 +1107,7 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
     (depositPct <= 0
       ? `✅ **No deposit required for you.**${NL}`
       : `💳 **Deposit required (${depositPct}%):** **${depStr}**${NL}`) +
-    (depositDueAt ? `${NL}⏰ **Deadline:** ${depositDueAt}${NL}` : "");
+    `${NL}⏳ **Deposit Closes In:** **${finalizedCountdown}**${NL}`;
 
   return new EmbedBuilder().setTitle("📌 Bulk Payment / Confirmation").setDescription(desc).setColor(0xffd300);
 }
@@ -1813,7 +1838,6 @@ app.post("/close-opportunity", async (req, res) => {
         unitPrice: totals.unitPrice,
         totalAmount: totals.totalAmount,
         depositPct,
-        depositDueAt,
       });
 
       const components = depositPct > 0 ? [buildDepositButtonRow(c.id, true)] : [];
