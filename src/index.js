@@ -145,6 +145,7 @@ const F = {
   COM_DEAL_CHANNEL_ID: "Discord Deal Channel ID",
   COM_DEAL_MESSAGE_ID: "Discord Deal Message ID",
   COM_FINAL_UNIT_PRICE: "Final Unit Price", // currency field on Commitments
+  COM_DEPOSIT_PCT: "Deposit %",
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -856,19 +857,48 @@ async function computeCommitmentTotals(commitmentRecordId, oppFields) {
   return { qtyTotal, currency, unitPrice, totalAmount };
 }
 
+function normalizePercentNumber(raw) {
+  // Accepts: 50, "50", "50%", 0.5, "0.5", ["50%"]
+  if (raw === undefined || raw === null) return null;
+
+  const s = Array.isArray(raw) ? String(raw[0] ?? "").trim() : String(raw).trim();
+  if (!s) return null;
+
+  const cleaned = s.replace(/[^0-9.,-]/g, "");
+  if (!cleaned) return null;
+
+  const normalized = cleaned.includes(",") && !cleaned.includes(".")
+    ? cleaned.replace(/,/g, ".")
+    : cleaned;
+
+  const n = Number(normalized);
+  if (!Number.isFinite(n)) return null;
+
+  // If stored as 0–1, convert to 0–100
+  if (n > 0 && n <= 1) return n * 100;
+
+  return n;
+}
+
 async function getBuyerDepositPct(commitmentFields) {
+  // 1) Commitment override (Deposit % on the commitment record)
+  const fromCommitment = normalizePercentNumber(commitmentFields?.[F.COM_DEPOSIT_PCT]);
+  if (fromCommitment !== null) return fromCommitment;
+
+  // 2) Buyer default
   const buyerLinks = commitmentFields?.[F.COM_BUYER];
   const buyerId = Array.isArray(buyerLinks) ? buyerLinks[0] : null;
   if (!buyerId) return 50;
 
   try {
     const b = await buyersTable.find(buyerId);
-    const pct = Number(b.fields?.[F.BUYER_DEFAULT_DEPOSIT_PCT] ?? 50);
-    return Number.isFinite(pct) ? pct : 50;
+    const fromBuyer = normalizePercentNumber(b.fields?.[F.BUYER_DEFAULT_DEPOSIT_PCT]);
+    return fromBuyer !== null ? fromBuyer : 50;
   } catch {
     return 50;
   }
 }
+
 
 async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, staffRoleIds, nameSuffix }) {
   const baseName = safeChannelName(buyerTag) + (nameSuffix ? `-${nameSuffix}` : "");
