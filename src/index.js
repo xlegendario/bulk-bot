@@ -221,6 +221,12 @@ function getCommitmentIdSuffix(commitmentFields) {
   return parts.length ? parts[parts.length - 1] : null;
 }
 
+function toBulkId(opportunityIdOrFallback) {
+  const raw = asText(opportunityIdOrFallback).trim();
+  if (!raw) return "";
+  // OPP-2026-0006 -> BULK-2026-0006
+  return raw.startsWith("OPP-") ? `BULK-${raw.slice(4)}` : raw;
+}
 
 function formatMoney(code, value) {
   const raw = asText(value);
@@ -995,42 +1001,44 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
   const ch = await guild.channels.fetch(String(SUPPLIER_QUOTES_CHANNEL_ID)).catch(() => null);
   if (!ch || !ch.isTextBased()) return null;
 
-  const title = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const bulkId = toBulkId(oppId);
+
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
 
   const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
+  const supplierUnitStr =
+    supplierUnit === null || Number.isNaN(supplierUnit) ? "—" : formatMoney(currency, supplierUnit);
 
-  const supplierUnitStr = supplierUnit === null || Number.isNaN(supplierUnit)
-    ? "—"
-    : formatMoney(currency, supplierUnit);
-
-  const supplierTotal = supplierUnit === null || Number.isNaN(supplierUnit)
-    ? null
-    : supplierUnit * totalPairs;
-
+  const supplierTotal =
+    supplierUnit === null || Number.isNaN(supplierUnit) ? null : supplierUnit * totalPairs;
   const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
 
-  const content =
-    `📦 **SUPPLIER QUOTE (BUY)**${NL}` +
-    `**${title}** — ${product}${NL}${NL}` +
-    `**Confirmed Pairs:** **${totalPairs}**${NL}${NL}` +
-    `**Supplier Unit Price:** ${supplierUnitStr}${NL}` +
-    `**Supplier Total:** ${supplierTotalStr}${NL}${NL}` +
-    `**Size Breakdown**${NL}${sizeTotalsText}`;
+  const embed = new EmbedBuilder()
+    .setTitle("📦 SUPPLIER QUOTE (BUY)")
+    .setDescription(`**${bulkId}** — ${product}`)
+    .setColor(0xffd300)
+    .addFields(
+      { name: "Confirmed Pairs", value: `**${totalPairs}**`, inline: true },
+      { name: "Supplier Unit Price", value: supplierUnitStr, inline: true },
+      { name: "Supplier Total", value: supplierTotalStr, inline: true },
+      { name: "Size Breakdown", value: sizeTotalsText || "(none)", inline: false }
+    );
 
   const existingMsgId = asText(oppFields[F.OPP_QUOTES_MESSAGE_ID]);
   if (existingMsgId) {
     try {
       const m = await ch.messages.fetch(existingMsgId);
-      await m.edit(content);
+      await m.edit({ content: "", embeds: [embed] });
       return m.id;
     } catch {}
   }
 
-  const m = await ch.send(content);
+  const m = await ch.send({ embeds: [embed] });
   await oppsTable.update(oppRecordId, { [F.OPP_QUOTES_MESSAGE_ID]: String(m.id) });
   return m.id;
 }
+
 
 async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalPairs, sizeTotalsText, currency }) {
   if (!CONFIRMED_BULKS_CHANNEL_ID) return;
@@ -1038,10 +1046,11 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
   const ch = await guild.channels.fetch(String(CONFIRMED_BULKS_CHANNEL_ID)).catch(() => null);
   if (!ch || !ch.isTextBased()) return;
 
-  const title = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const bulkId = toBulkId(oppId);
+
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
 
-  // Use FINAL fields (snapshotted on finalize)
   const sellUnit = formatMoney(currency, oppFields[F.OPP_FINAL_SELL_PRICE]);
   const discount = formatPercent(oppFields[F.OPP_FINAL_DISCOUNT_PCT]);
 
@@ -1049,16 +1058,21 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
   const totalSell = Number.isFinite(sellUnitRaw) ? sellUnitRaw * totalPairs : null;
   const totalSellStr = totalSell === null ? "—" : formatMoney(currency, totalSell);
 
-  const text =
-    `✅ **CONFIRMED BULK (SELL)**${NL}` +
-    `**${title}** — ${product}${NL}${NL}` +
-    `**Final Total Pairs:** **${totalPairs}**${NL}` +
-    `**Final Sell Price:** ${sellUnit}${NL}**Total Sell:** ${totalSellStr}${NL}` +
-    `**Final Discount:** ${discount}${NL}${NL}` +
-    `**Sizes**${NL}${sizeTotalsText}`;
+  const embed = new EmbedBuilder()
+    .setTitle("✅ CONFIRMED BULK (SELL)")
+    .setDescription(`**${bulkId}** — ${product}`)
+    .setColor(0xffd300)
+    .addFields(
+      { name: "Final Total Pairs", value: `**${totalPairs}**`, inline: true },
+      { name: "Final Sell Price", value: sellUnit, inline: true },
+      { name: "Total Sell", value: totalSellStr, inline: true },
+      { name: "Final Discount", value: discount, inline: true },
+      { name: "Sizes", value: sizeTotalsText || "(none)", inline: false }
+    );
 
-  await ch.send(text);
+  await ch.send({ embeds: [embed] });
 }
+
 
 /* =========================
    INTERACTIONS
