@@ -211,6 +211,17 @@ function currencySymbol(code) {
   return c ? `${c} ` : "";
 }
 
+function getCommitmentIdSuffix(commitmentFields) {
+  // Adjust this field name if your Airtable column is named differently
+  const commitmentId = asText(commitmentFields?.["Commitment ID"]).trim();
+  if (!commitmentId) return null;
+
+  // Take whatever is after the last "-"
+  const parts = commitmentId.split("-").map((p) => p.trim()).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+
 function formatMoney(code, value) {
   const raw = asText(value);
   if (!raw) return "—";
@@ -1593,15 +1604,16 @@ app.post("/close-opportunity", async (req, res) => {
         dealChannel = await guild.channels.fetch(existingDealChannelId).catch(() => null);
       }
 
-      if (!dealChannel) {
-        dealChannel = await ensureDealChannel({
-          guild,
-          categoryId: category.id,
-          buyerDiscordId,
-          buyerTag,
-          staffRoleIds,
-          nameSuffix: opportunityRecordId.slice(-4),
-        });
+      const suffix = getCommitmentIdSuffix(c.fields) || opportunityRecordId.slice(-4);
+
+      dealChannel = await ensureDealChannel({
+        guild,
+        categoryId: category.id,
+        buyerDiscordId,
+        buyerTag,
+        staffRoleIds,
+        nameSuffix: suffix,
+      });
         await commitmentsTable.update(c.id, { [F.COM_DEAL_CHANNEL_ID]: String(dealChannel.id) });
         channelsCreated++;
       }
