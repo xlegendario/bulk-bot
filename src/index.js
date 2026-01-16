@@ -122,6 +122,7 @@ const F = {
   OPP_DISCORD_CATEGORY_ID: "Discord Category ID",
   OPP_QUOTES_MESSAGE_ID: "Discord Quotes Message ID",
   OPP_DEPOSIT_DUE_AT: "Deposit Due At",
+  OPP_SUPPLIER_LINK: "Supplier", // linked field on Opportunities
 
   // New: supplier + final snapshot fields
   OPP_SUPPLIER_UNIT_PRICE: "Supplier Price",
@@ -143,6 +144,7 @@ const F = {
   COM_LAST_ACTION: "Last Action",
   COM_DEAL_CHANNEL_ID: "Discord Deal Channel ID",
   COM_DEAL_MESSAGE_ID: "Discord Deal Message ID",
+  COM_FINAL_UNIT_PRICE: "Final Unit Price", // currency field on Commitments
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -167,6 +169,7 @@ const F = {
   CB_LINKED_OPPORTUNITY: "Linked Opportunity",
   CB_LINKED_COMMITMENTS: "Linked Commitments",
   CB_LINKED_BUYERS: "Linked Buyers",
+  CB_LINKED_SUPPLIER: "Linked Supplier", // linked field on Confirmed Bulks
   
 };
 
@@ -286,6 +289,24 @@ function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
   return ladder.slice(start, end + 1);
 }
 
+async function setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, unitPriceNumber) {
+  if (!Number.isFinite(unitPriceNumber)) return;
+
+  const rows = await commitmentsTable
+    .select({
+      maxRecords: 1000,
+      filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}'`,
+    })
+    .all();
+
+  const updates = rows
+    .map((r) => ({ id: r.id, fields: { [F.COM_FINAL_UNIT_PRICE]: unitPriceNumber } }))
+    .filter((u) => u.id);
+
+  for (let i = 0; i < updates.length; i += 10) {
+    await commitmentsTable.update(updates.slice(i, i + 10));
+  }
+}
 
 
 function buildOrFormula(fieldName, values) {
@@ -1022,7 +1043,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    await commitmentsTable.update(commitmentId, { [F.COM_STATUS]: "Deposit Paid" });
+    const c = await commitmentsTable.find(commitmentId);
+    const depositPct = await getBuyerDepositPct(c.fields);
+
+    const newStatus = depositPct >= 100 ? "Paid" : "Deposit Paid";
+    const label = newStatus === "Paid" ? "Paid ✓" : "Deposit Paid ✓";
+    await commitmentsTable.update(commitmentId, { [F.COM_STATUS]: newStatus });
 
     // Disable button
     try {
@@ -1035,6 +1061,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch {}
 
     await interaction.editReply("✅ Deposit marked as paid.");
+    return;
+  }
+
+    // Staff confirm remaining paid button
+  if (interaction.isButton() && interaction.customId.startsWith("paid_confirm:")) {
+    const commitmentId = interaction.customId.split("paid_confirm:")[1];
+
+    if (!interaction.guildId) {
+      await interaction.reply({
+        content: "This button can only be used in the server.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!isStaffMember(member)) {
+      await interaction.reply({ content: "⛔ Staff only.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    await commitmentsTable.update(commitmentId, { [F.COM_STATUS]: "Paid" });
+
+    // Disable buttons on the message
+    try {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`deposit_confirm:${commitmentId}`)
+          .setLabel("Deposit / Paid ✓")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(true),
+        new ButtonBuilder()
+          .setCustomId(`paid_confirm:${commitmentId}`)
+          .setLabel("Paid ✓")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true)
+      );
+      await interaction.message.edit({ components: [row] });
+    } catch {}
+
+    await interaction.editReply("✅ Marked as Paid.");
     return;
   }
 
@@ -1443,6 +1512,12 @@ app.post("/close-opportunity", async (req, res) => {
 
     await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
 
+    const finalUnit = parseMoneyNumber(
+      oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]
+    );
+
+    await setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, finalUnit);
+
     const category = await ensureOppCategory(guild, opportunityRecordId, oppFields);
     const staffRoleIds = parseCsvIds(STAFF_ROLE_IDS);
 
@@ -1542,13 +1617,14 @@ app.post("/close-opportunity", async (req, res) => {
 });
 
 /* =========================
-   CONFIRED BULKS HELPERS
+   CONFIRMED BULKS HELPERS
 ========================= */
 
 async function findConfirmedBulkByOpportunity(opportunityRecordId) {
   const rows = await confirmedBulksTable
     .select({
       maxRecords: 1,
+      // Works for linked-record fields that store an array of record IDs
       filterByFormula: `FIND('${escapeForFormula(
         opportunityRecordId
       )}', ARRAYJOIN({${F.CB_LINKED_OPPORTUNITY}}, ',')) > 0`,
@@ -1560,11 +1636,12 @@ async function findConfirmedBulkByOpportunity(opportunityRecordId) {
 
 async function createConfirmedBulkLinks({
   opportunityRecordId,
-  eligibleCommitmentRecords, // Airtable commitment records
+  eligibleCommitmentRecords, // Airtable commitment records (full records, not only IDs)
+  oppFields, // pass the opportunity fields so we can link supplier too
 }) {
   const linkedCommitmentIds = eligibleCommitmentRecords.map((r) => r.id);
 
-  // Collect buyer record IDs from linked field on each commitment
+  // Collect Buyer record IDs (linked field on each commitment)
   const buyerIds = new Set();
   for (const r of eligibleCommitmentRecords) {
     const links = r.fields?.[F.COM_BUYER];
@@ -1573,36 +1650,44 @@ async function createConfirmedBulkLinks({
     }
   }
 
+  // Link Supplier (linked field on Opportunity)
+  const supplierLinks = oppFields?.[F.OPP_SUPPLIER_LINK]; // should be an array of supplier record IDs
+  const supplierId = Array.isArray(supplierLinks) ? supplierLinks[0] : null;
+
   const payload = {
     [F.CB_LINKED_OPPORTUNITY]: [opportunityRecordId],
     [F.CB_LINKED_COMMITMENTS]: linkedCommitmentIds,
     [F.CB_LINKED_BUYERS]: Array.from(buyerIds),
+    ...(supplierId ? { [F.CB_LINKED_SUPPLIER]: [supplierId] } : {}),
   };
 
-  // Upsert behavior: update if exists, otherwise create
   const existing = await findConfirmedBulkByOpportunity(opportunityRecordId);
   if (existing) {
     return await confirmedBulksTable.update(existing.id, payload);
   }
-
   return await confirmedBulksTable.create(payload);
 }
-
 
 app.post("/finalize-opportunity", async (req, res) => {
   try {
     if (!assertSecret(req, res)) return;
+
     const { opportunityRecordId } = req.body || {};
-    if (!opportunityRecordId) return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
 
     const guildId = await inferGuildId();
-    if (!guildId) return res.status(500).json({ ok: false, error: "Could not infer guild id" });
-
+    if (!guildId) {
+      return res.status(500).json({ ok: false, error: "Could not infer guild id" });
+    }
     const guild = await client.guilds.fetch(guildId);
 
+    // ---- Load opportunity ----
     let opp = await oppsTable.find(opportunityRecordId);
     let oppFields = opp.fields || {};
 
+    // ---- Load all commitments for this opportunity ----
     const commitments = await commitmentsTable
       .select({
         maxRecords: 1000,
@@ -1610,6 +1695,7 @@ app.post("/finalize-opportunity", async (req, res) => {
       })
       .all();
 
+    // ---- Determine eligible commitments ----
     const eligibleCommitmentIds = [];
     let cancelled = 0;
 
@@ -1617,7 +1703,7 @@ app.post("/finalize-opportunity", async (req, res) => {
       const st = asText(c.fields[F.COM_STATUS]) || "";
       const depositPct = await getBuyerDepositPct(c.fields);
 
-      const isEligible = st === "Deposit Paid" || st === "Paid" || (depositPct <= 0 && st === "Locked");
+      const isEligible = st === "Paid" || st === "Deposit Paid" || (depositPct <= 0 && st === "Locked");
 
       if (isEligible) {
         eligibleCommitmentIds.push(c.id);
@@ -1627,13 +1713,19 @@ app.post("/finalize-opportunity", async (req, res) => {
       }
     }
 
-    // Build size totals from eligible commitments using Counted Quantity
+    // ---- Build size totals from eligible commitments using Counted Quantity ----
     const sizeTotals = new Map();
 
     for (let i = 0; i < eligibleCommitmentIds.length; i += 25) {
       const chunk = eligibleCommitmentIds.slice(i, i + 25);
       const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
-      const lines = await linesTable.select({ filterByFormula: `${orChunk}`, maxRecords: 1000 }).all();
+
+      const lines = await linesTable
+        .select({
+          filterByFormula: `${orChunk}`,
+          maxRecords: 1000,
+        })
+        .all();
 
       for (const line of lines) {
         const size = asText(line.fields[F.LINE_SIZE]);
@@ -1648,8 +1740,11 @@ app.post("/finalize-opportunity", async (req, res) => {
     const totalPairs = sortedSizes.reduce((sum, [, q]) => sum + q, 0);
     const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
 
-    // Snapshot final fields in Airtable
-    const finalSellPrice = parseMoneyNumber(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
+    // ---- Snapshot final fields on opportunity ----
+    const finalSellPrice = parseMoneyNumber(
+      oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]
+    );
+
     await oppsTable.update(opportunityRecordId, {
       [F.OPP_FINAL_TOTAL_PAIRS]: totalPairs,
       [F.OPP_FINAL_SELL_PRICE]: Number.isFinite(finalSellPrice) ? finalSellPrice : null,
@@ -1657,33 +1752,33 @@ app.post("/finalize-opportunity", async (req, res) => {
       [F.OPP_STATUS]: "Confirmed",
     });
 
-    // Re-fetch to ensure Final fields are present for Confirmed Bulks summary
+    // Re-fetch to ensure Final fields exist for summaries + confirmed bulks record
     opp = await oppsTable.find(opportunityRecordId);
     oppFields = opp.fields || {};
 
-    // Post supplier quote (buy) and confirmed bulks summary (sell)
+    // ---- Post supplier quote (BUY) + confirmed bulks summary (SELL) ----
     await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
     await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
 
-    // Create Confirmed Bulks links record
-    try {
-      const eligibleRecords = commitments.filter((c) => eligibleCommitmentIds.includes(c.id));
-      if (eligibleRecords.length) {
+    // ---- Create/Update Confirmed Bulks record (LINKS only) ----
+    const eligibleRecords = commitments.filter((c) => eligibleCommitmentIds.includes(c.id));
+    if (eligibleRecords.length) {
+      try {
         await createConfirmedBulkLinks({
           opportunityRecordId,
           eligibleCommitmentRecords: eligibleRecords,
+          oppFields, // extra arg is ok even if function ignores it
         });
+      } catch (e) {
+        console.warn("⚠️ Confirmed Bulks linking failed:", e?.message || e);
       }
-    } catch (e) {
-      console.warn("⚠️ Confirmed Bulks linking failed:", e?.message || e);
     }
 
-    // Notify buyers
+    // ---- Notify buyers + edit deal message buttons ----
     for (const c of commitments) {
       const dealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
       if (!dealChannelId) continue;
 
-      // Re-fetch status so cancellations made earlier are reflected
       let freshC;
       try {
         freshC = await commitmentsTable.find(c.id);
@@ -1693,33 +1788,59 @@ app.post("/finalize-opportunity", async (req, res) => {
 
       const stFresh = asText(freshC.fields[F.COM_STATUS]) || "";
       const depositPctFresh = await getBuyerDepositPct(freshC.fields);
+
       const eligibleFresh =
-        stFresh === "Deposit Paid" || stFresh === "Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
+        stFresh === "Paid" || stFresh === "Deposit Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
 
       try {
         const ch = await guild.channels.fetch(dealChannelId);
         if (!ch || !ch.isTextBased()) continue;
 
+        const dealMsgId = asText(freshC.fields[F.COM_DEAL_MESSAGE_ID]);
+
+        // Eligible: message + "Confirm Remaining Paid" button if not Paid yet
         if (eligibleFresh) {
           await ch.send("✅ Included in supplier order. We will update you here once we have tracking / ETA.");
+
+          if (dealMsgId && stFresh !== "Paid") {
+            try {
+              const m = await ch.messages.fetch(dealMsgId);
+
+              const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                  .setCustomId(`deposit_confirm:${freshC.id}`)
+                  .setLabel("Deposit / Paid ✓")
+                  .setStyle(ButtonStyle.Secondary)
+                  .setDisabled(true),
+                new ButtonBuilder()
+                  .setCustomId(`paid_confirm:${freshC.id}`)
+                  .setLabel("Confirm Remaining Paid")
+                  .setStyle(ButtonStyle.Success)
+              );
+
+              await m.edit({ components: [row] });
+            } catch (_) {}
+          }
+
           continue;
         }
 
+        // Cancelled: message + disable buttons
         if (stFresh === "Cancelled") {
           await ch.send("❌ Deposit not received in time. Your commitment has been cancelled.");
 
-          // Disable the deposit button on the original deal message (if present)
-          const dealMsgId = asText(freshC.fields[F.COM_DEAL_MESSAGE_ID]);
           if (dealMsgId) {
             try {
               const m = await ch.messages.fetch(dealMsgId);
+
               const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
-                  .setCustomId(`deposit_confirm:${c.id}`)
+                  .setCustomId(`deposit_confirm:${freshC.id}`)
                   .setLabel("Cancelled")
                   .setStyle(ButtonStyle.Danger)
                   .setDisabled(true)
               );
+
               await m.edit({ components: [row] });
             } catch (_) {}
           }
@@ -1727,17 +1848,22 @@ app.post("/finalize-opportunity", async (req, res) => {
       } catch (_) {}
     }
 
-    // auto-sync public + DMs
+    // ---- auto-sync public + DMs (locks buttons visually) ----
     await syncPublic(opportunityRecordId);
     await syncDms(opportunityRecordId);
 
-    return res.json({ ok: true, finalized: true, eligible: eligibleCommitmentIds.length, cancelled });
+    return res.json({
+      ok: true,
+      finalized: true,
+      eligible: eligibleCommitmentIds.length,
+      cancelled,
+      totalPairs,
+    });
   } catch (err) {
     console.error("finalize-opportunity error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-
 
 app.listen(LISTEN_PORT, () => console.log(`🌐 Listening on ${LISTEN_PORT}`));
 
