@@ -47,6 +47,7 @@ const {
   AIRTABLE_LINES_TABLE = "Commitment Lines",
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
   AIRTABLE_CONFIRMED_BULKS_TABLE = "Confirmed Bulks",
+  AIRTABLE_BULK_REQUESTS_TABLE = "Bulk Requests",
 
   // Tier engine tables
   AIRTABLE_TIER_RULES_TABLE = "Tier Rules",
@@ -60,6 +61,7 @@ const {
   SUPPLIER_QUOTES_CHANNEL_ID, // staff-only channel for supplier quote
   CONFIRMED_BULKS_CHANNEL_ID, // staff-only channel for confirmed bulks summary
   STAFF_ROLE_IDS, // optional comma-separated role IDs
+  DISCORD_REQUEST_BULKS_CHANNEL_ID,
 } = process.env;
 
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
@@ -90,6 +92,8 @@ const sizePresetsTable = base(AIRTABLE_SIZE_PRESETS_TABLE);
 const tierRulesTable = base(AIRTABLE_TIER_RULES_TABLE);
 const tierRuleSetsTable = base(AIRTABLE_TIER_RULE_SETS_TABLE);
 const confirmedBulksTable = base(AIRTABLE_CONFIRMED_BULKS_TABLE);
+const bulkRequestsTable = base(AIRTABLE_BULK_REQUESTS_TABLE);
+
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
 
@@ -171,7 +175,13 @@ const F = {
   CB_LINKED_COMMITMENTS: "Linked Commitments",
   CB_LINKED_BUYERS: "Linked Buyers",
   CB_LINKED_SUPPLIER: "Linked Supplier", // linked field on Confirmed Bulks
-  
+
+  // Bulk Requests
+  BR_SKU: "SKU",
+  BR_QTY: "Quantity",
+  BR_BUYER_TARGET_PRICE: "Buyer Target Price",
+  BR_REQUEST_STATUS: "Request Status",
+  BR_AMOUNT_OF_REQUESTS: "Amount of Requests",
 };
 
 /* =========================
@@ -209,6 +219,65 @@ function currencySymbol(code) {
   if (c === "USD") return "$";
   if (c === "GBP") return "£";
   return c ? `${c} ` : "";
+}
+
+const REQ = {
+  BTN_OPEN: "reqbulks_open",
+  MODAL: "reqbulks_modal",
+  SKU: "req_sku",
+  QTY: "req_qty",
+  PRICE: "req_price",
+};
+
+function normalizeSku(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+async function upsertBulkRequest({ skuRaw, qty, buyerTargetPrice }) {
+  const skuNorm = normalizeSku(skuRaw);
+  if (!skuNorm) throw new Error("SKU missing");
+
+  const formula =
+    `AND(` +
+    `LOWER({${F.BR_SKU}}) = '${escapeForFormula(skuNorm)}',` +
+    `{${F.BR_REQUEST_STATUS}} = 'Pending Request'` +
+    `)`;
+
+  const existing = await bulkRequestsTable
+    .select({ maxRecords: 1, filterByFormula: formula })
+    .firstPage();
+
+  // UPDATE existing
+  if (existing.length) {
+    const r = existing[0];
+    const f = r.fields || {};
+
+    const prevQty = Number(f[F.BR_QTY] ?? 0) || 0;
+    const prevCount = Number(f[F.BR_AMOUNT_OF_REQUESTS] ?? 1) || 1;
+    const prevAvg = Number(f[F.BR_BUYER_TARGET_PRICE] ?? 0) || 0;
+
+    const newCount = prevCount + 1;
+    const newAvg = (prevAvg * prevCount + buyerTargetPrice) / newCount;
+
+    await bulkRequestsTable.update(r.id, {
+      [F.BR_QTY]: prevQty + qty,
+      [F.BR_AMOUNT_OF_REQUESTS]: newCount,
+      [F.BR_BUYER_TARGET_PRICE]: Number(newAvg.toFixed(2)),
+    });
+
+    return { action: "updated", id: r.id };
+  }
+
+  // CREATE new
+  const created = await bulkRequestsTable.create({
+    [F.BR_SKU]: String(skuRaw).trim(),
+    [F.BR_QTY]: qty,
+    [F.BR_BUYER_TARGET_PRICE]: buyerTargetPrice,
+    [F.BR_AMOUNT_OF_REQUESTS]: 1,
+    [F.BR_REQUEST_STATUS]: "Pending Request",
+  });
+
+  return { action: "created", id: created.id };
 }
 
 function getCommitmentIdSuffix(commitmentFields) {
@@ -353,6 +422,34 @@ function scheduleDeleteInteractionReply(interaction, ms = 2000) {
   setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
 }
 
+async function ensureRequestBulksMessage() {
+  if (!DISCORD_REQUEST_BULKS_CHANNEL_ID) return;
+
+  const ch = await client.channels.fetch(String(DISCORD_REQUEST_BULKS_CHANNEL_ID)).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle("📦 Bulk Requests")
+    .setDescription("Submit a SKU request (SKU + target €/unit + quantity).")
+    .setColor(0xffd300);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(REQ.BTN_OPEN)
+      .setLabel("Submit Request")
+      .setEmoji("📝")
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  const recent = await ch.messages.fetch({ limit: 25 }).catch(() => null);
+  const existing = recent?.find(
+    (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === "📦 Bulk Requests"
+  );
+
+  if (existing) await existing.edit({ embeds: [embed], components: [row] });
+  else await ch.send({ embeds: [embed], components: [row] });
+}
+
 /* =========================
    DISCORD CLIENT
 ========================= */
@@ -364,6 +461,7 @@ const client = new Client({
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
+  await ensureRequestBulksMessage();
 });
 
 async function inferGuildId() {
@@ -1119,6 +1217,76 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.isButton() && interaction.customId === REQ.BTN_OPEN) {
+    const modal = new ModalBuilder().setCustomId(REQ.MODAL).setTitle("Submit Bulk Request");
+
+    const sku = new TextInputBuilder()
+      .setCustomId(REQ.SKU)
+      .setLabel("SKU (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. HV0823-200");
+
+    const qty = new TextInputBuilder()
+      .setCustomId(REQ.QTY)
+      .setLabel("Quantity (pairs) (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. 50");
+
+    const price = new TextInputBuilder()
+      .setCustomId(REQ.PRICE)
+      .setLabel("Buyer Target Price (per unit) (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. 140 or €140");
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(sku),
+      new ActionRowBuilder().addComponents(qty),
+      new ActionRowBuilder().addComponents(price)
+    );
+  
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === REQ.MODAL) {
+    const skuRaw = interaction.fields.getTextInputValue(REQ.SKU)?.trim();
+    const qtyRaw = interaction.fields.getTextInputValue(REQ.QTY)?.trim();
+    const priceRaw = interaction.fields.getTextInputValue(REQ.PRICE)?.trim();
+
+    const qty = Number.parseInt(qtyRaw, 10);
+    const buyerTargetPrice = parseMoneyNumber(priceRaw);
+
+    if (!skuRaw) {
+      await interaction.reply({ content: "❌ SKU is required.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0) {
+      await interaction.reply({ content: "❌ Quantity must be a positive number.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (buyerTargetPrice === null || !Number.isFinite(buyerTargetPrice) || buyerTargetPrice <= 0) {
+      await interaction.reply({
+        content: "❌ Target price must be a valid positive number (e.g. 140 or €140).",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      const res = await upsertBulkRequest({ skuRaw, qty, buyerTargetPrice });
+      await interaction.editReply(`✅ Request ${res.action}.`);
+    } catch (e) {
+      console.error("Bulk request submit failed:", e);
+      await interaction.editReply("❌ Something went wrong while saving your request.");
+    }
+    return;
+  }
+
     // Staff confirm remaining paid button
   if (interaction.isButton() && interaction.customId.startsWith("paid_confirm:")) {
     const commitmentId = interaction.customId.split("paid_confirm:")[1];
@@ -1620,14 +1788,16 @@ app.post("/close-opportunity", async (req, res) => {
 
       const suffix = getCommitmentIdSuffix(c.fields) || opportunityRecordId.slice(-4);
 
-      dealChannel = await ensureDealChannel({
-        guild,
-        categoryId: category.id,
-        buyerDiscordId,
-        buyerTag,
-        staffRoleIds,
-        nameSuffix: suffix,
-      });
+      if (!dealChannel) {
+        dealChannel = await ensureDealChannel({
+          guild,
+          categoryId: category.id,
+          buyerDiscordId,
+          buyerTag,
+          staffRoleIds,
+          nameSuffix: suffix,
+        });
+
         await commitmentsTable.update(c.id, { [F.COM_DEAL_CHANNEL_ID]: String(dealChannel.id) });
         channelsCreated++;
       }
