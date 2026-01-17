@@ -65,6 +65,7 @@ const {
   DISCORD_REQUEST_BULKS_CHANNEL_ID,
   ADMIN_DRAFT_QUOTES_CHANNEL_ID,
   SUPPLIER_GUILD_ID,
+  CLOSED_BULKS_CHANNEL_ID,
   
 } = process.env;
 
@@ -2667,7 +2668,6 @@ app.post("/finalize-opportunity", async (req, res) => {
     const { totalPairs, sizeTotalsText } = quoteMapToTotals(finalQuoteMap);
     const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
 
-
     // ---- Snapshot final fields on opportunity ----
     const finalSellPrice = parseMoneyNumber(
       oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]
@@ -2685,8 +2685,24 @@ app.post("/finalize-opportunity", async (req, res) => {
     oppFields = opp.fields || {};
 
     // ---- Post supplier quote (BUY) + confirmed bulks summary (SELL) ----
-    await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
-    await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
+    await postSupplierQuote({
+      guild,
+      oppRecordId: opportunityRecordId,
+      oppFields,
+      sizeTotalsText,
+      totalPairs,
+      currency,
+    });
+
+    await postConfirmedBulksSummary({
+      guild,
+      oppRecordId: opportunityRecordId,
+      oppFields,
+      totalPairs,
+      sizeTotalsText,
+      currency,
+    });
+
     await postSupplierConfirmedQuoteToSupplierServer({
       oppRecordId: opportunityRecordId,
       oppFields,
@@ -2725,7 +2741,9 @@ app.post("/finalize-opportunity", async (req, res) => {
       const depositPctFresh = await getBuyerDepositPct(freshC.fields);
 
       const eligibleFresh =
-        stFresh === "Paid" || stFresh === "Deposit Paid" || (depositPctFresh <= 0 && stFresh === "Locked");
+        stFresh === "Paid" ||
+        stFresh === "Deposit Paid" ||
+        (depositPctFresh <= 0 && stFresh === "Locked");
 
       try {
         const ch = await guild.channels.fetch(dealChannelId);
@@ -2786,6 +2804,41 @@ app.post("/finalize-opportunity", async (req, res) => {
     // ---- auto-sync public + DMs (locks buttons visually) ----
     await syncPublic(opportunityRecordId);
     await syncDms(opportunityRecordId);
+
+    // ---- Post to Closed Bulks channel ----
+    if (CLOSED_BULKS_CHANNEL_ID) {
+      try {
+        const closedCh = await client.channels.fetch(String(CLOSED_BULKS_CHANNEL_ID)).catch(() => null);
+        if (closedCh?.isTextBased()) {
+          const embed = buildClosedBulkEmbed({ oppFields, totalPairs, currency });
+          await closedCh.send({ embeds: [embed] });
+        }
+      } catch (e) {
+        console.error("Closed bulks post failed:", e);
+      }
+    }
+
+    // ---- Delete from Active Bulks channel to keep it clean ----
+    try {
+      const pubChannelId = asText(oppFields["Discord Public Channel ID"]);
+      const pubMessageId = asText(oppFields["Discord Public Message ID"]);
+
+      if (pubChannelId && pubMessageId) {
+        const ch = await client.channels.fetch(String(pubChannelId)).catch(() => null);
+        if (ch?.isTextBased()) {
+          const msg = await ch.messages.fetch(String(pubMessageId)).catch(() => null);
+          if (msg) await msg.delete().catch(() => {});
+        }
+
+        // Clear ids so sync doesn't try to edit a deleted message later
+        await oppsTable.update(opportunityRecordId, {
+          "Discord Public Channel ID": "",
+          "Discord Public Message ID": "",
+        });
+      }
+    } catch (e) {
+      console.error("Active bulk delete failed:", e);
+    }
 
     return res.json({
       ok: true,
