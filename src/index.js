@@ -652,6 +652,56 @@ async function setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, u
   }
 }
 
+function buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency }) {
+  if (!Array.isArray(tiers) || !tiers.length || !Number.isFinite(startPrice)) return "";
+
+  const total = Math.max(Number(currentTotalPairs || 0), 0);
+
+  // find current tier
+  let current = tiers[0];
+  for (const t of tiers) {
+    if (total >= t.minPairs) current = t;
+    else break;
+  }
+
+  const sym = currencySymbol(currency);
+  const maxLines = 6;
+  const lines = [];
+
+  for (const t of tiers) {
+    const pct = ((t.discount || 0) * 100).toFixed(2).replace(/\.00$/, "");
+    const price = startPrice * (1 - (t.discount || 0));
+    const priceStr = `${sym}${price % 1 === 0 ? price.toFixed(0) : price.toFixed(2)}`;
+
+    const isCurrent = t.minPairs === current.minPairs && t.discount === current.discount;
+    const prefix = isCurrent ? "✅ " : "• ";
+
+    lines.push(`${prefix}**${t.minPairs}** pairs → **-${pct}%** → **${priceStr}**`);
+    if (lines.length >= maxLines) break;
+  }
+
+  return lines.join(NL);
+}
+
+async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
+  const embed = buildOpportunityEmbed(fields);
+
+  const startPrice = Number(asText(fields[F.OPP_START_SELL_PRICE]));
+  const currentTotalPairs = Number(asText(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0));
+  const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
+
+  if (!Number.isFinite(startPrice)) return embed;
+
+  const tiers = await fetchTiersForOpportunity(oppRecordId);
+  if (!tiers.length) return embed;
+
+  const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
+  if (!ladder) return embed;
+
+  embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
+  return embed;
+}
+
 
 function buildOrFormula(fieldName, values) {
   const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
@@ -678,6 +728,8 @@ function deferEphemeralIfGuild(inGuild) {
 function scheduleDeleteInteractionReply(interaction, ms = 2000) {
   setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
 }
+
+
 
 async function ensureRequestBulksMessage() {
   if (!DISCORD_REQUEST_BULKS_CHANNEL_ID) return;
@@ -1301,7 +1353,7 @@ async function refreshDmPanel(oppRecordId, commitmentRecordId) {
   const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
   const components = sizes.length ? buildSizeButtons(oppRecordId, sizes, status) : [];
 
-  const oppEmbed = buildOpportunityEmbed(oppFields);
+  const oppEmbed = await buildOpportunityEmbedWithLadder(oppRecordId, oppFields);
   const linesText = await getCartLinesText(commitmentRecordId);
   const cartEmbed = buildCartEmbed(linesText, status, lastAction);
 
@@ -2149,7 +2201,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const dm = await interaction.user.createDM();
 
-      const oppEmbed = buildOpportunityEmbed(oppFields);
+      const oppEmbed = await buildOpportunityEmbedWithLadder(opportunityRecordId, oppFields);
       const linesText = await getCartLinesText(commitment.id);
       const lastAction = asText(fresh.fields[F.COM_LAST_ACTION]);
       const cartEmbed = buildCartEmbed(linesText, status, lastAction);
@@ -2401,7 +2453,7 @@ async function syncPublic(opportunityRecordId) {
   if (!channel || !channel.isTextBased()) return;
 
   const message = await channel.messages.fetch(String(messageId));
-  const embed = buildOpportunityEmbed(fields);
+  const embed = await buildOpportunityEmbedWithLadder(opportunityRecordId, fields);
 
   const oppStatus = asText(fields[F.OPP_STATUS]) || "";
   const disabled = oppStatus && oppStatus !== "Open";
@@ -2457,7 +2509,7 @@ app.post("/post-opportunity", async (req, res) => {
       return res.json({ ok: true, skipped: true, reason: "Already posted", messageId: fields["Discord Public Message ID"] });
     }
 
-    const embed = buildOpportunityEmbed(fields);
+    const embed = await buildOpportunityEmbedWithLadder(opportunityRecordId, fields);
     const row = buildJoinRow(opportunityRecordId, false, "Join Bulk");
 
     const channel = await client.channels.fetch(String(BULK_PUBLIC_CHANNEL_ID));
