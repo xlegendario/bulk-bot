@@ -289,6 +289,28 @@ async function getSupplierChannelIdsFromOpportunity(oppFields) {
   return { supplierId, requestedQuotesChId, confirmedQuotesChId };
 }
 
+async function getAllocationDeltaSummary(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  let changed = false;
+  let reducedCount = 0;
+
+  for (const r of rows) {
+    const requested = Number(r.fields?.[F.LINE_COUNTED_QTY] ?? 0);
+    const allocated = Number(r.fields?.[F.LINE_ALLOCATED_QTY] ?? requested);
+
+    if (allocated !== requested) changed = true;
+    if (allocated < requested) reducedCount++;
+  }
+
+  return { changed, reducedCount };
+}
+
 async function allocateFromFinalQuote(opportunityRecordId) {
   const opp = await oppsTable.find(opportunityRecordId);
   const oppFields = opp.fields || {};
@@ -1389,6 +1411,12 @@ async function startDepositsFromAllocated(opportunityRecordId) {
       channelsCreated++;
     }
 
+    const { changed, reducedCount } = await getAllocationDeltaSummary(c.id);
+
+    const allocationNote = changed
+      ? `⚠️ **Allocation update:** Some sizes were reduced due to limited supplier stock. This payment request reflects your **final allocated quantities**.${NL}${NL}`
+      : "";
+
     // Build deposit embed using ALLOCATED lines
     const commitmentLinesText = await getAllocatedLinesText(c.id);
 
@@ -1401,12 +1429,13 @@ async function startDepositsFromAllocated(opportunityRecordId) {
     const depositPct = await getBuyerDepositPct(c.fields);
 
     const embed = buildDepositEmbed({
-      oppFields,
+    	oppFields,
       commitmentLinesText,
       currency,
       unitPrice,
       totalAmount,
       depositPct,
+      note: allocationNote,
     });
 
     const components = depositPct > 0 ? [buildDepositButtonRow(c.id, true)] : [];
@@ -1485,7 +1514,7 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
   });
 }
 
-function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct }) {
+function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct, note }) {
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk";
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
   
@@ -1500,6 +1529,7 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
   const depStr = `${sym}${depAmount % 1 === 0 ? depAmount.toFixed(0) : depAmount.toFixed(2)}`;
 
   const desc =
+    (note || "") +
     `**${product}**${NL}` +
     `**SKU:** \`${sku}\`${NL}${NL}` +
     `**Your commitment:**${NL}${commitmentLinesText}${NL}${NL}` +
