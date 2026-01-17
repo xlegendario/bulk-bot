@@ -1383,6 +1383,115 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  if (interaction.isButton() && interaction.customId.startsWith(`${SUPQ.SIZE}:`)) {
+    // supq_size:<oppId>:<size>
+    const parts = interaction.customId.split(":");
+    const oppRecordId = parts[1];
+    const size = parts.slice(2).join(":"); // safe even if size contains weird chars
+
+    if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    const requestedMap = quoteFieldToMap(oppFields[F.OPP_REQUESTED_QUOTE]);
+    const requestedQty = requestedMap.get(String(size));
+    const placeholder = Number.isFinite(requestedQty) ? `requested quantity: ${requestedQty}` : "enter available qty";
+
+    const modal = new ModalBuilder()
+      .setCustomId(`${SUPQ.MODAL}:${oppRecordId}:${size}`)
+      .setTitle(`Set available qty — ${size}`);
+
+    const input = new TextInputBuilder()
+      .setCustomId(SUPQ.QTY)
+      .setLabel("Available quantity")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder(placeholder);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SUPQ.MODAL}:`)) {
+    // supq_modal:<oppId>:<size>
+    const parts = interaction.customId.split(":");
+    const oppRecordId = parts[1];
+    const size = parts.slice(2).join(":");
+
+    if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const raw = interaction.fields.getTextInputValue(SUPQ.QTY) || "";
+    const qty = Math.max(0, Number(String(raw).replace(/[^\d]/g, "")) || 0);
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Load opp + maps
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    const requestedMap = quoteFieldToMap(oppFields[F.OPP_REQUESTED_QUOTE]);
+    const workingMap = quoteFieldToMap(oppFields[F.OPP_SUPPLIER_QUOTE_WORKING]);
+
+    // Update just this size
+    workingMap.set(String(size), qty);
+
+    // Persist working quote while editing ✅
+    const workingJson = mapToQuoteJson(workingMap);
+    await oppsTable.update(oppRecordId, { [F.OPP_SUPPLIER_QUOTE_WORKING]: workingJson });
+
+    // Rebuild embed
+    const embed = buildSupplierDraftEmbed({
+      oppFields,
+      requestedMap,
+      workingMap,
+    });
+
+    const sizes = Array.from(requestedMap.keys()).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
+    );
+    const rows = [buildSupplierMainRow(oppRecordId, false), ...buildSupplierSizeRows(oppRecordId, sizes, false)];
+
+    // Update supplier message reliably (don’t depend on modal having message)
+    try {
+      const supplierMsgId = asText(oppFields[F.OPP_SUPPLIER_QUOTE_MSG_ID]);
+      const { requestedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFields);
+
+      if (SUPPLIER_GUILD_ID && supplierMsgId && requestedQuotesChId) {
+        const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
+        const supplierCh = await supplierGuild.channels.fetch(String(requestedQuotesChId)).catch(() => null);
+
+        if (supplierCh?.isTextBased()) {
+          const m = await supplierCh.messages.fetch(String(supplierMsgId)).catch(() => null);
+          if (m) await m.edit({ embeds: [embed], components: rows });
+        }
+      }
+    } catch {}
+
+    // Update admin mirror (read-only) to match
+    try {
+      const adminMsgId = asText(oppFields[F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]);
+      if (ADMIN_DRAFT_QUOTES_CHANNEL_ID && adminMsgId) {
+        const adminCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
+        if (adminCh?.isTextBased()) {
+          const m = await adminCh.messages.fetch(String(adminMsgId)).catch(() => null);
+          if (m) await m.edit({ embeds: [embed] });
+        }
+      }
+    } catch {}
+
+    await interaction.editReply("✅ Updated.");
+    scheduleDeleteInteractionReply(interaction, 1500);
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith(`${SUPQ.CONFIRM}:`)) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
