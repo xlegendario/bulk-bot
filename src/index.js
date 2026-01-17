@@ -1414,7 +1414,7 @@ async function startDepositsFromAllocated(opportunityRecordId) {
     const { changed, reducedCount } = await getAllocationDeltaSummary(c.id);
 
     const allocationNote = changed
-      ? `⚠️ **Allocation update:** Some sizes were reduced due to limited supplier stock. This payment request reflects your **final allocated quantities**.${NL}${NL}`
+      ? `⚠️ Supplier stock was limited. This quote reflects your final quantities.`
       : "";
 
     // Build deposit embed using ALLOCATED lines
