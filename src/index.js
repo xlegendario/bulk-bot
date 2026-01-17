@@ -1349,6 +1349,69 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
 
+  // =========================
+  // SUPPLIER QUOTE: Edit / Confirm
+  // =========================
+  if (interaction.isButton() && interaction.customId.startsWith(`${SUPQ.EDIT}:`)) {
+    // Always ACK fast so Discord doesn't show "interaction failed"
+    await interaction.deferUpdate();
+
+    const oppRecordId = interaction.customId.split(":")[1];
+
+    // Only allow in supplier server (optional safety)
+    if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) return;
+
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    const requestedMap = quoteFieldToMap(oppFields[F.OPP_REQUESTED_QUOTE]);
+    const workingMap = quoteFieldToMap(oppFields[F.OPP_SUPPLIER_QUOTE_WORKING]);
+
+    // sizes from requested quote (max ~18 in your case)
+    const sizes = Array.from(requestedMap.keys()).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
+    );
+
+    const embed = buildSupplierDraftEmbed({ oppFields, requestedMap, workingMap });
+
+    const rows = [
+      buildSupplierMainRow(oppRecordId, false),
+      ...buildSupplierSizeRows(oppRecordId, sizes, false),
+    ];
+
+    await interaction.message.edit({ embeds: [embed], components: rows });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith(`${SUPQ.CONFIRM}:`)) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const oppRecordId = interaction.customId.split(":")[1];
+
+    if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+      await interaction.editReply("Not allowed here.");
+      return;
+    }
+
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+
+    // Final Quote = current working quote
+    const workingJson = asText(oppFields[F.OPP_SUPPLIER_QUOTE_WORKING]) || "{}";
+
+    await oppsTable.update(oppRecordId, {
+      [F.OPP_FINAL_QUOTE]: workingJson,
+    });
+
+    // Disable buttons on supplier message (optional)
+    try {
+      await interaction.message.edit({ components: [buildSupplierMainRow(oppRecordId, true)] });
+    } catch {}
+
+    await interaction.editReply("✅ Confirmed. Final Quote saved.");
+    return;
+  }
+
   // Staff confirm deposit button
   if (interaction.isButton() && interaction.customId.startsWith("deposit_confirm:")) {
     const commitmentId = interaction.customId.split("deposit_confirm:")[1];
