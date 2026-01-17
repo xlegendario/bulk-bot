@@ -48,6 +48,7 @@ const {
   AIRTABLE_SIZE_PRESETS_TABLE = "Size Presets",
   AIRTABLE_CONFIRMED_BULKS_TABLE = "Confirmed Bulks",
   AIRTABLE_BULK_REQUESTS_TABLE = "Bulk Requests",
+  AIRTABLE_SUPPLIERS_TABLE = "Suppliers",
 
   // Tier engine tables
   AIRTABLE_TIER_RULES_TABLE = "Tier Rules",
@@ -62,6 +63,9 @@ const {
   CONFIRMED_BULKS_CHANNEL_ID, // staff-only channel for confirmed bulks summary
   STAFF_ROLE_IDS, // optional comma-separated role IDs
   DISCORD_REQUEST_BULKS_CHANNEL_ID,
+  ADMIN_DRAFT_QUOTES_CHANNEL_ID,
+  SUPPLIER_GUILD_ID,
+  
 } = process.env;
 
 const LISTEN_PORT = Number.parseInt(process.env.PORT, 10) || 10000;
@@ -93,6 +97,7 @@ const tierRulesTable = base(AIRTABLE_TIER_RULES_TABLE);
 const tierRuleSetsTable = base(AIRTABLE_TIER_RULE_SETS_TABLE);
 const confirmedBulksTable = base(AIRTABLE_CONFIRMED_BULKS_TABLE);
 const bulkRequestsTable = base(AIRTABLE_BULK_REQUESTS_TABLE);
+const suppliersTable = base(AIRTABLE_SUPPLIERS_TABLE);
 
 
 console.log("✅ Airtable base configured:", AIRTABLE_BASE_ID);
@@ -129,6 +134,12 @@ const F = {
   OPP_SUPPLIER_LINK: "Supplier", // linked field on Opportunities
   OPP_CLOSE_AT: "Close At",
   OPP_FINALIZED_AT: "Finalized At",
+  OPP_REQUESTED_QUOTE: "Requested Quote",
+  OPP_SUPPLIER_QUOTE_WORKING: "Supplier Quote Working",
+  OPP_FINAL_QUOTE: "Final Quote",
+  OPP_SUPPLIER_QUOTE_MSG_ID: "Supplier Quote Message ID",
+  OPP_ADMIN_DRAFT_QUOTE_MSG_ID: "Admin Draft Quote Message ID",
+
 
   // New: supplier + final snapshot fields
   OPP_SUPPLIER_UNIT_PRICE: "Supplier Price",
@@ -159,6 +170,7 @@ const F = {
   LINE_SIZE: "Size",
   LINE_QTY: "Quantity",
   LINE_COUNTED_QTY: "Counted Quantity",
+  LINE_ALLOCATED_QTY: "Allocated Quantity",
 
   // Size presets
   PRESET_SIZE_LADDER: "Size Ladder",
@@ -177,6 +189,10 @@ const F = {
   CB_LINKED_COMMITMENTS: "Linked Commitments",
   CB_LINKED_BUYERS: "Linked Buyers",
   CB_LINKED_SUPPLIER: "Linked Supplier", // linked field on Confirmed Bulks
+
+  // Suppliers table
+  SUP_REQUESTED_QUOTES_CH_ID: "Requested Quotes Channel ID",
+  SUP_CONFIRMED_QUOTES_CH_ID: "Confirmed Quotes Channel ID",
 
   // Bulk Requests
   BR_SKU: "SKU",
@@ -215,6 +231,53 @@ function asText(v) {
   return String(v);
 }
 
+function safeJsonParse(s) {
+  try {
+    const v = JSON.parse(String(s || ""));
+    return v && typeof v === "object" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+// Our quote storage format is JSON in long-text fields:
+// { "36": 7, "36.5": 3, ... }
+function quoteFieldToMap(fieldValue) {
+  const obj = safeJsonParse(asText(fieldValue));
+  if (!obj) return new Map();
+  const m = new Map();
+  for (const [k, v] of Object.entries(obj)) {
+    const qty = Number(v);
+    if (k && Number.isFinite(qty) && qty >= 0) m.set(String(k), qty);
+  }
+  return m;
+}
+
+function mapToQuoteJson(map) {
+  const obj = {};
+  for (const [k, v] of map.entries()) obj[String(k)] = Number(v) || 0;
+  return JSON.stringify(obj);
+}
+
+function quoteMapToLines(map) {
+  const arr = Array.from(map.entries())
+    .filter(([_, q]) => Number(q) > 0)
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]), undefined, { numeric: true }));
+  return arr.map(([s, q]) => `${s}×${q}`).join("\n") || "(none)";
+}
+
+async function getSupplierChannelIdsFromOpportunity(oppFields) {
+  const links = oppFields?.[F.OPP_SUPPLIER_LINK];
+  const supplierId = Array.isArray(links) ? links[0] : null;
+  if (!supplierId) return { supplierId: null, requestedQuotesChId: null, confirmedQuotesChId: null };
+
+  const sup = await suppliersTable.find(supplierId);
+  const requestedQuotesChId = asText(sup.fields?.[F.SUP_REQUESTED_QUOTES_CH_ID]);
+  const confirmedQuotesChId = asText(sup.fields?.[F.SUP_CONFIRMED_QUOTES_CH_ID]);
+
+  return { supplierId, requestedQuotesChId, confirmedQuotesChId };
+}
+
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
   if (c === "EUR") return "€";
@@ -229,6 +292,14 @@ const REQ = {
   SKU: "req_sku",
   QTY: "req_qty",
   PRICE: "req_price",
+};
+
+const SUPQ = {
+  EDIT: "supq_edit",        // supq_edit:<oppId>
+  CONFIRM: "supq_confirm",  // supq_confirm:<oppId>
+  SIZE: "supq_size",        // supq_size:<oppId>:<size>
+  MODAL: "supq_modal",      // supq_modal:<oppId>:<size>
+  QTY: "qty",
 };
 
 function toUnixSecondsFromAirtableDate(v) {
@@ -467,6 +538,30 @@ async function ensureRequestBulksMessage() {
   if (existing) await existing.edit({ embeds: [embed], components: [row] });
   else await ch.send({ embeds: [embed], components: [row] });
 }
+
+async function buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, lockedCommitmentIds) {
+  const sizeTotals = new Map();
+
+  for (let i = 0; i < lockedCommitmentIds.length; i += 25) {
+    const chunk = lockedCommitmentIds.slice(i, i + 25);
+    const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
+
+    const lines = await linesTable
+      .select({ filterByFormula: `${orChunk}`, maxRecords: 1000 })
+      .all();
+
+    for (const line of lines) {
+      const size = asText(line.fields?.[F.LINE_SIZE]).trim();
+      const qty = Number(line.fields?.[F.LINE_COUNTED_QTY] ?? 0);
+
+      if (!size || !Number.isFinite(qty) || qty <= 0) continue;
+      sizeTotals.set(size, (sizeTotals.get(size) || 0) + qty);
+    }
+  }
+
+  return sizeTotals;
+}
+
 
 /* =========================
    DISCORD CLIENT
@@ -926,6 +1021,56 @@ function buildSizeButtons(opportunityRecordId, sizes, status) {
   rows.push(controls);
   return rows;
 }
+
+function buildSupplierDraftEmbed({ oppFields, requestedMap, workingMap }) {
+  const oppId = asText(oppFields["Opportunity ID"]);
+  const bulkId = toBulkId(oppId || "");
+  const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+
+  return new EmbedBuilder()
+    .setTitle("📩 Incoming Quote (Supplier)")
+    .setDescription(`**${bulkId || "BULK"}** — ${product}`)
+    .setColor(0xffd300)
+    .addFields(
+      { name: "Requested (buyers)", value: quoteMapToLines(requestedMap), inline: false },
+      { name: "Available (supplier)", value: quoteMapToLines(workingMap), inline: false }
+    );
+}
+
+function buildSupplierMainRow(oppRecordId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`${SUPQ.EDIT}:${oppRecordId}`)
+      .setLabel("Edit")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled),
+    new ButtonBuilder()
+      .setCustomId(`${SUPQ.CONFIRM}:${oppRecordId}`)
+      .setLabel("Confirm")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(disabled)
+  );
+}
+
+function buildSupplierSizeRows(oppRecordId, sizes, disabled = false) {
+  const rows = [];
+  for (let i = 0; i < sizes.length; i += 5) {
+    const chunk = sizes.slice(i, i + 5);
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        ...chunk.map((s) =>
+          new ButtonBuilder()
+            .setCustomId(`${SUPQ.SIZE}:${oppRecordId}:${s}`)
+            .setLabel(String(s))
+            .setStyle(ButtonStyle.Primary)
+            .setDisabled(disabled)
+        )
+      )
+    );
+  }
+  return rows;
+}
+
 
 /* =========================
    DM PANEL UPDATE
@@ -1748,27 +1893,31 @@ app.post("/close-opportunity", async (req, res) => {
   try {
     if (!assertSecret(req, res)) return;
     const { opportunityRecordId } = req.body || {};
-    if (!opportunityRecordId) return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    if (!opportunityRecordId) {
+      return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
+    }
 
+    // MAIN KC guild (still needed to mark statuses / later stages)
     const guildId = await inferGuildId();
-    if (!guildId) return res.status(500).json({ ok: false, error: "Could not infer guild id" });
+    if (!guildId) {
+      return res.status(500).json({ ok: false, error: "Could not infer guild id" });
+    }
+    await client.guilds.fetch(guildId); // keep for permission sanity (not used yet in step 2)
 
-    const guild = await client.guilds.fetch(guildId);
-
+    // ---- Load opportunity ----
     const opp = await oppsTable.find(opportunityRecordId);
     const oppFields = opp.fields || {};
 
+    // Close the opportunity
     await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
 
+    // Copy final unit price to commitments (you already do this)
     const finalUnit = parseMoneyNumber(
       oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]
     );
-
     await setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, finalUnit);
 
-    const category = await ensureOppCategory(guild, opportunityRecordId, oppFields);
-    const staffRoleIds = parseCsvIds(STAFF_ROLE_IDS);
-
+    // ---- Load all commitments ----
     const commitments = await commitmentsTable
       .select({
         maxRecords: 1000,
@@ -1776,95 +1925,139 @@ app.post("/close-opportunity", async (req, res) => {
       })
       .all();
 
-    const depositDueAt = asText(oppFields[F.OPP_DEPOSIT_DUE_AT]);
-
     let locked = 0;
     let cancelled = 0;
-    const cancelledIds = new Set();
-    let channelsCreated = 0;
 
+    // ---- Lock/cancel only (NO deal channels, NO deposit embeds) ----
     for (const c of commitments) {
       const st = asText(c.fields[F.COM_STATUS]) || "";
 
       if (st === "Draft") {
         await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
-        cancelledIds.add(c.id);
         cancelled++;
         continue;
       }
 
       if (st === "Submitted" || st === "Editing") {
         await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Locked" });
+        locked++;
+        continue;
       }
 
-      const newStatus = st === "Submitted" || st === "Editing" ? "Locked" : st;
-      if (newStatus === "Locked") locked++;
-      if (newStatus !== "Locked") continue;
-
-      const buyerDiscordId = asText(c.fields[F.COM_DISCORD_USER_ID]);
-      const buyerTag = asText(c.fields[F.COM_DISCORD_USER_TAG]) || buyerDiscordId;
-      if (!buyerDiscordId) continue;
-
-      let dealChannel = null;
-      const existingDealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
-      if (existingDealChannelId) {
-        dealChannel = await guild.channels.fetch(existingDealChannelId).catch(() => null);
+      if (st === "Locked") {
+        locked++;
       }
-
-      const suffix = getCommitmentIdSuffix(c.fields) || opportunityRecordId.slice(-4);
-
-      if (!dealChannel) {
-        dealChannel = await ensureDealChannel({
-          guild,
-          categoryId: category.id,
-          buyerDiscordId,
-          buyerTag,
-          staffRoleIds,
-          nameSuffix: suffix,
-        });
-
-        await commitmentsTable.update(c.id, { [F.COM_DEAL_CHANNEL_ID]: String(dealChannel.id) });
-        channelsCreated++;
-      }
-
-      const depositPct = await getBuyerDepositPct(c.fields);
-      const totals = await computeCommitmentTotals(c.id, oppFields);
-      const commitmentLinesText = await getCartLinesText(c.id);
-
-      const embed = buildDepositEmbed({
-        oppFields,
-        commitmentLinesText,
-        currency: totals.currency,
-        unitPrice: totals.unitPrice,
-        totalAmount: totals.totalAmount,
-        depositPct,
-      });
-
-      const components = depositPct > 0 ? [buildDepositButtonRow(c.id, true)] : [];
-
-      const existingDealMsgId = asText(c.fields[F.COM_DEAL_MESSAGE_ID]);
-      if (existingDealMsgId) {
-        try {
-          const m = await dealChannel.messages.fetch(existingDealMsgId);
-          await m.edit({ embeds: [embed], components });
-          continue;
-        } catch {}
-      }
-
-      const m = await dealChannel.send({ embeds: [embed], components });
-      await commitmentsTable.update(c.id, { [F.COM_DEAL_MESSAGE_ID]: String(m.id) });
     }
 
-    // auto-sync public + DMs to lock buttons visually
+    // ---- Build Requested Quote from locked commitments (Counted Quantity) ----
+    const lockedCommitmentIds = commitments
+      .filter((c) => {
+        const st = asText(c.fields[F.COM_STATUS]) || "";
+        // note: c.fields might be stale for those we updated above,
+        // but "Locked" was already Locked, and Submitted/Editing got locked.
+        // We want both: Locked + (Submitted/Editing that we just locked)
+        return st === "Locked" || st === "Submitted" || st === "Editing";
+      })
+      .map((c) => c.id);
+
+    const requestedMap = await buildRequestedQuoteMapForLockedCommitments(
+      opportunityRecordId,
+      lockedCommitmentIds
+    );
+
+    const requestedJson = mapToQuoteJson(requestedMap);
+
+    // Default working quote = requested
+    await oppsTable.update(opportunityRecordId, {
+      [F.OPP_REQUESTED_QUOTE]: requestedJson,
+      [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
+    });
+
+    // Re-fetch opp fields for message IDs
+    const oppFresh = await oppsTable.find(opportunityRecordId);
+    const oppFreshFields = oppFresh.fields || {};
+
+    // ---- Post supplier draft quote embed in SUPPLIER server ----
+    if (!SUPPLIER_GUILD_ID) throw new Error("SUPPLIER_GUILD_ID missing in env");
+
+    const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
+    const { requestedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFreshFields);
+
+    if (!requestedQuotesChId) throw new Error("Requested Quotes Channel ID missing on Supplier record");
+
+    const supplierCh = await supplierGuild.channels.fetch(String(requestedQuotesChId)).catch(() => null);
+    if (!supplierCh || !supplierCh.isTextBased()) {
+      throw new Error("Supplier requested quotes channel not found or not text-based");
+    }
+
+    const workingMap = requestedMap;
+    const draftEmbed = buildSupplierDraftEmbed({
+      oppFields: oppFreshFields,
+      requestedMap,
+      workingMap,
+    });
+
+    // Edit existing supplier message or send new
+    const existingSupplierMsgId = asText(oppFreshFields[F.OPP_SUPPLIER_QUOTE_MSG_ID]);
+    let supplierMsg = null;
+
+    if (existingSupplierMsgId) {
+      try {
+        supplierMsg = await supplierCh.messages.fetch(existingSupplierMsgId);
+        await supplierMsg.edit({
+          embeds: [draftEmbed],
+          components: [buildSupplierMainRow(opportunityRecordId, false)],
+        });
+      } catch {}
+    }
+
+    if (!supplierMsg) {
+      supplierMsg = await supplierCh.send({
+        embeds: [draftEmbed],
+        components: [buildSupplierMainRow(opportunityRecordId, false)],
+      });
+
+      await oppsTable.update(opportunityRecordId, {
+        [F.OPP_SUPPLIER_QUOTE_MSG_ID]: String(supplierMsg.id),
+      });
+    }
+
+    // ---- Admin draft mirror (read-only) ----
+    if (ADMIN_DRAFT_QUOTES_CHANNEL_ID) {
+      const adminDraftCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
+      if (adminDraftCh && adminDraftCh.isTextBased()) {
+        const existingAdminMsgId = asText(oppFreshFields[F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]);
+        if (existingAdminMsgId) {
+          try {
+            const m = await adminDraftCh.messages.fetch(existingAdminMsgId);
+            await m.edit({ embeds: [draftEmbed] });
+          } catch {}
+        } else {
+          const m = await adminDraftCh.send({ embeds: [draftEmbed] });
+          await oppsTable.update(opportunityRecordId, {
+            [F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]: String(m.id),
+          });
+        }
+      }
+    }
+
+    // Optional: lock public + DM buttons visually
     await syncPublic(opportunityRecordId);
     await syncDms(opportunityRecordId);
 
-    return res.json({ ok: true, closed: true, locked, cancelled, channelsCreated });
+    return res.json({
+      ok: true,
+      closed: true,
+      stage: "awaiting_supplier_quote",
+      locked,
+      cancelled,
+    });
   } catch (err) {
     console.error("close-opportunity error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
 
 /* =========================
    CONFIRMED BULKS HELPERS
