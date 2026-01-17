@@ -140,6 +140,7 @@ const F = {
   OPP_FINAL_QUOTE: "Final Quote",
   OPP_SUPPLIER_QUOTE_MSG_ID: "Supplier Quote Message ID",
   OPP_ADMIN_DRAFT_QUOTE_MSG_ID: "Admin Draft Quote Message ID",
+  OPP_ETA_BUSINESS_DAYS: "ETA (Business Days)",
 
 
   // New: supplier + final snapshot fields
@@ -240,6 +241,14 @@ function safeJsonParse(s) {
     return null;
   }
 }
+
+function formatEtaBusinessDays(v) {
+  const n = Number(asText(v));
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const days = Math.round(n);
+  return `Estimated delivery: **${days} business day${days === 1 ? "" : "s"}** after supplier confirmation.`;
+}
+
 
 // Our quote storage format is JSON in long-text fields:
 // { "36": 7, "36.5": 3, ... }
@@ -452,6 +461,12 @@ const SUPQ = {
   CONFIRM: "supq_confirm",  // supq_confirm:<oppId>
   SIZE: "supq_size",        // supq_size:<oppId>:<size>
   MODAL: "supq_modal",      // supq_modal:<oppId>:<size>
+  QTY: "qty",
+};
+
+const FULLRUN = {
+  BTN: "fullrun",              // fullrun:<oppId>
+  MODAL: "fullrun_modal",      // fullrun_modal:<oppId>
   QTY: "qty",
 };
 
@@ -1119,6 +1134,7 @@ function buildOpportunityEmbed(fields) {
   const minSize = asText(fields[F.OPP_MIN_SIZE]) || "—";
   const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
+  const etaLine = formatEtaBusinessDays(fields[F.OPP_ETA_BUSINESS_DAYS]);
 
   const currentPrice = formatMoney(currency, fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]);
   const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
@@ -1132,6 +1148,7 @@ function buildOpportunityEmbed(fields) {
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
+    etaLine ? `**ETA:** ${etaLine}` : null,
     "",
     `**Current Price:** **${currentPrice}**`,
     `**Current Discount:** **${currentDiscount}**`,
@@ -1141,7 +1158,7 @@ function buildOpportunityEmbed(fields) {
     `**Next Tier Discount:** **${nextDiscount}**`,
     "",
     `**Closes:** **${closeCountdown}**`,
-  ].join(NL);
+  ].filter(Boolean).join(NL);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
 
@@ -1196,18 +1213,22 @@ function buildSizeButtons(opportunityRecordId, sizes, status) {
 
   if (isEditable) {
     controls.addComponents(
+      new ButtonBuilder().setCustomId(`fullrun:${opportunityRecordId}`).setLabel("Full Size Run").setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId(`cart_submit:${opportunityRecordId}`).setLabel("Submit").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`cart_clear:${opportunityRecordId}`).setLabel("Clear").setStyle(ButtonStyle.Danger)
     );
   } else if (isSubmitted) {
-    controls.addComponents(new ButtonBuilder().setCustomId(`cart_addmore:${opportunityRecordId}`).setLabel("Add More").setStyle(ButtonStyle.Success));
+    controls.addComponents(
+      new ButtonBuilder().setCustomId(`cart_addmore:${opportunityRecordId}`).setLabel("Add More").setStyle(ButtonStyle.Success)
+    );
   } else if (isHardLocked) {
     controls.addComponents(
       new ButtonBuilder().setCustomId(`cart_locked:${opportunityRecordId}`).setLabel("Locked").setStyle(ButtonStyle.Secondary).setDisabled(true)
     );
   }
 
-  rows.push(controls);
+  // Only push if it actually has components
+  if (controls.components.length) rows.push(controls);
   return rows;
 }
 
@@ -1518,6 +1539,7 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
 function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct, note }) {
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk";
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+  const etaLine = formatEtaBusinessDays(oppFields[F.OPP_ETA_BUSINESS_DAYS]);
   
   const finalizedAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
   const finalizedCountdown = fmtDiscordRelative(finalizedAtUnix);
@@ -1533,6 +1555,7 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
     (note || "") +
     `**${product}**${NL}` +
     `**SKU:** \`${sku}\`${NL}${NL}` +
+    (etaLine ? `**ETA:** ${etaLine}${NL}${NL}` : `${NL}`) +
     `**Your commitment:**${NL}${commitmentLinesText}${NL}${NL}` +
     `**Unit price:** ${unitStr}${NL}` +
     `**Total:** ${totalStr}${NL}${NL}` +
@@ -2004,6 +2027,93 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch {}
 
     await interaction.editReply("✅ Marked as Paid.");
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith("fullrun:")) {
+    const oppRecordId = interaction.customId.split("fullrun:")[1];
+
+    // Ensure commitment exists and is editable
+    let commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+
+    if (commitment) {
+      const status = await getCommitmentStatus(commitment.id);
+      if (!EDITABLE_STATUSES.has(status)) {
+        await interaction.reply({
+          content: "⚠️ This commitment is not editable right now.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`fullrun_modal:${oppRecordId}`)
+      .setTitle("Full Size Run");
+
+    const qtyInput = new TextInputBuilder()
+      .setCustomId(FULLRUN.QTY)
+      .setLabel("Quantity per size")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. 2");
+
+    modal.addComponents(new ActionRowBuilder().addComponents(qtyInput));
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("fullrun_modal:")) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const oppRecordId = interaction.customId.split("fullrun_modal:")[1];
+
+    const qtyRaw = interaction.fields.getTextInputValue(FULLRUN.QTY);
+    const qty = Number.parseInt(qtyRaw, 10);
+
+    if (!Number.isFinite(qty) || qty <= 0 || qty > 999) {
+      await interaction.editReply("⚠️ Enter a valid quantity (1–999).");
+      return;
+    }
+
+    // Ensure commitment exists
+    let commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+
+    if (!commitment) {
+      const buyer = await upsertBuyer(interaction.user);
+      commitment = await createCommitment({
+        oppRecordId,
+        buyerRecordId: buyer.id,
+        discordId: interaction.user.id,
+        discordTag: interaction.user.tag,
+      });
+    }
+
+    const statusNow = await getCommitmentStatus(commitment.id);
+    if (!EDITABLE_STATUSES.has(statusNow)) {
+      await interaction.editReply("⚠️ This commitment is not editable right now.");
+      return;
+    }
+
+    // Get allowed sizes
+    const opp = await oppsTable.find(oppRecordId);
+    const oppFields = opp.fields || {};
+    const sizes = await resolveAllowedSizesAndMaybeWriteback(oppRecordId, oppFields);
+
+    // Apply qty to ALL sizes (respect your Editing rule: only increase)
+    for (const size of sizes) {
+      if (statusNow === "Editing") {
+        const existingQty = await getLineQty(commitment.id, size);
+        if (qty < existingQty) continue; // don't decrease in Editing
+      }
+      await upsertLine(commitment.id, size, qty);
+    }
+
+    await touchCommitment(commitment.id, { [F.COM_LAST_ACTION]: `Full run × ${qty}` });
+    await refreshDmPanel(oppRecordId, commitment.id);
+
+    await interaction.editReply(`✅ Applied full size run: **${qty}** per size.`);
     return;
   }
 
