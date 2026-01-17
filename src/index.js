@@ -266,6 +266,17 @@ function quoteMapToLines(map) {
   return arr.map(([s, q]) => `${s}×${q}`).join("\n") || "(none)";
 }
 
+function quoteMapToTotals(map) {
+  const entries = Array.from(map.entries())
+    .map(([s, q]) => [String(s), Number(q) || 0])
+    .filter(([_, q]) => q > 0)
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  const totalPairs = entries.reduce((sum, [, q]) => sum + q, 0);
+  const sizeTotalsText = entries.length ? entries.map(([s, q]) => `• ${s}: ${q}`).join(NL) : "(none)";
+  return { totalPairs, sizeTotalsText };
+}
+
 async function getSupplierChannelIdsFromOpportunity(oppFields) {
   const links = oppFields?.[F.OPP_SUPPLIER_LINK];
   const supplierId = Array.isArray(links) ? links[0] : null;
@@ -283,7 +294,7 @@ async function allocateFromFinalQuote(opportunityRecordId) {
   const oppFields = opp.fields || {};
 
   const availableMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]); // size -> available qty (supplier)
-  if (!availableMap.size) throw new Error("Final Quote is empty or not valid JSON.");
+  if (availableMap.size === 0) throw new Error("Final Quote is empty or not valid JSON.");
 
   // Load commitments for this opp
   const commitments = await commitmentsTable
@@ -1586,6 +1597,45 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
   await ch.send({ embeds: [embed] });
 }
 
+async function postSupplierConfirmedQuoteToSupplierServer({ oppRecordId, oppFields, sizeTotalsText, totalPairs, currency }) {
+  if (!SUPPLIER_GUILD_ID) return;
+
+  const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID)).catch(() => null);
+  if (!supplierGuild) return;
+
+  const { confirmedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFields);
+  if (!confirmedQuotesChId) return;
+
+  const ch = await supplierGuild.channels.fetch(String(confirmedQuotesChId)).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
+
+  const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
+  const bulkId = toBulkId(oppId);
+  const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+
+  const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
+  const supplierUnitStr =
+    supplierUnit === null || Number.isNaN(supplierUnit) ? "—" : formatMoney(currency, supplierUnit);
+
+  const supplierTotal =
+    supplierUnit === null || Number.isNaN(supplierUnit) ? null : supplierUnit * totalPairs;
+  const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
+
+  const embed = new EmbedBuilder()
+    .setTitle("✅ CONFIRMED QUOTE (SUPPLIER)")
+    .setDescription(`**${bulkId}** — ${product}`)
+    .setColor(0xffd300)
+    .addFields(
+      { name: "Total Pairs", value: `**${totalPairs}**`, inline: true },
+      { name: "Supplier Unit Price", value: supplierUnitStr, inline: true },
+      { name: "Supplier Total", value: supplierTotalStr, inline: true },
+      { name: "Sizes", value: sizeTotalsText || "(none)", inline: false }
+    );
+
+  await ch.send({ embeds: [embed] });
+}
+
+
 
 /* =========================
    INTERACTIONS
@@ -1753,8 +1803,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Final Quote = current working quote
     const workingJson = asText(oppFields[F.OPP_SUPPLIER_QUOTE_WORKING]) || "{}";
 
+    const finalizedAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
     await oppsTable.update(oppRecordId, {
       [F.OPP_FINAL_QUOTE]: workingJson,
+      [F.OPP_FINALIZED_AT]: finalizedAt,
     });
 
     // 1) Allocate lines
@@ -2579,32 +2632,11 @@ app.post("/finalize-opportunity", async (req, res) => {
       }
     }
 
-    // ---- Build size totals from eligible commitments using Counted Quantity ----
-    const sizeTotals = new Map();
-
-    for (let i = 0; i < eligibleCommitmentIds.length; i += 25) {
-      const chunk = eligibleCommitmentIds.slice(i, i + 25);
-      const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
-
-      const lines = await linesTable
-        .select({
-          filterByFormula: `${orChunk}`,
-          maxRecords: 1000,
-        })
-        .all();
-
-      for (const line of lines) {
-        const size = asText(line.fields[F.LINE_SIZE]);
-        const qty = Number(line.fields?.[F.LINE_COUNTED_QTY] ?? 0);
-        if (!size || !Number.isFinite(qty) || qty <= 0) continue;
-        sizeTotals.set(size, (sizeTotals.get(size) || 0) + qty);
-      }
-    }
-
-    const sortedSizes = Array.from(sizeTotals.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-    const sizeTotalsText = sortedSizes.length ? sortedSizes.map(([s, q]) => `• ${s}: ${q}`).join(NL) : "(none)";
-    const totalPairs = sortedSizes.reduce((sum, [, q]) => sum + q, 0);
+    // ---- Use Final Quote (supplier-confirmed) for final summaries ----
+    const finalQuoteMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
+    const { totalPairs, sizeTotalsText } = quoteMapToTotals(finalQuoteMap);
     const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+
 
     // ---- Snapshot final fields on opportunity ----
     const finalSellPrice = parseMoneyNumber(
@@ -2625,6 +2657,13 @@ app.post("/finalize-opportunity", async (req, res) => {
     // ---- Post supplier quote (BUY) + confirmed bulks summary (SELL) ----
     await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, sizeTotalsText, totalPairs, currency });
     await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, totalPairs, sizeTotalsText, currency });
+    await postSupplierConfirmedQuoteToSupplierServer({
+      oppRecordId: opportunityRecordId,
+      oppFields,
+      sizeTotalsText,
+      totalPairs,
+      currency,
+    });
 
     // ---- Create/Update Confirmed Bulks record (LINKS only) ----
     const eligibleRecords = commitments.filter((c) => eligibleCommitmentIds.includes(c.id));
