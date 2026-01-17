@@ -278,6 +278,125 @@ async function getSupplierChannelIdsFromOpportunity(oppFields) {
   return { supplierId, requestedQuotesChId, confirmedQuotesChId };
 }
 
+async function allocateFromFinalQuote(opportunityRecordId) {
+  const opp = await oppsTable.find(opportunityRecordId);
+  const oppFields = opp.fields || {};
+
+  const availableMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]); // size -> available qty (supplier)
+  if (!availableMap.size) throw new Error("Final Quote is empty or not valid JSON.");
+
+  // Load commitments for this opp
+  const commitments = await commitmentsTable
+    .select({
+      maxRecords: 1000,
+      filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}'`,
+    })
+    .all();
+
+  // Only allocate among Locked commitments (at this stage)
+  const locked = commitments.filter((c) => (asText(c.fields[F.COM_STATUS]) || "") === "Locked");
+  const lockedIds = locked.map((c) => c.id);
+  if (!lockedIds.length) return { allocatedLines: 0 };
+
+  // Fetch all lines for locked commitments (Counted Quantity is the requested snapshot)
+  const allLines = [];
+  for (let i = 0; i < lockedIds.length; i += 25) {
+    const chunk = lockedIds.slice(i, i + 25);
+    const orChunk = buildOrFormula(F.LINE_COMMITMENT_RECORD_ID, chunk);
+    const lines = await linesTable.select({ filterByFormula: `${orChunk}`, maxRecords: 1000 }).all();
+    allLines.push(...lines);
+  }
+
+  // Total pairs per commitment (tie-breaker)
+  const totalPairsByCommitment = new Map();
+  for (const line of allLines) {
+    const cid = asText(line.fields[F.LINE_COMMITMENT_RECORD_ID]);
+    const req = Number(line.fields?.[F.LINE_COUNTED_QTY] ?? 0);
+    if (!cid || !Number.isFinite(req) || req <= 0) continue;
+    totalPairsByCommitment.set(cid, (totalPairsByCommitment.get(cid) || 0) + req);
+  }
+
+  // Group requested per size
+  const requestedBySize = new Map(); // size -> [{ lineId, cid, req }]
+  for (const line of allLines) {
+    const size = asText(line.fields[F.LINE_SIZE]).trim();
+    const cid = asText(line.fields[F.LINE_COMMITMENT_RECORD_ID]).trim();
+    const req = Number(line.fields?.[F.LINE_COUNTED_QTY] ?? 0);
+    if (!size || !cid || !Number.isFinite(req) || req <= 0) continue;
+
+    if (!requestedBySize.has(size)) requestedBySize.set(size, []);
+    requestedBySize.get(size).push({ lineId: line.id, cid, req });
+  }
+
+  const updates = [];
+
+  for (const [size, rows] of requestedBySize.entries()) {
+    const requestedTotal = rows.reduce((s, r) => s + r.req, 0);
+    const available = Math.max(0, Number(availableMap.get(size) ?? 0));
+
+    if (available >= requestedTotal) {
+      // Everyone gets full request
+      for (const r of rows) updates.push({ id: r.lineId, fields: { [F.LINE_ALLOCATED_QTY]: r.req } });
+      continue;
+    }
+
+    // Pro-rata allocation
+    const ratio = requestedTotal > 0 ? available / requestedTotal : 0;
+
+    const tmp = rows.map((r) => {
+      const exact = r.req * ratio;
+      const base = Math.floor(exact);
+      const rem = exact - base;
+      return {
+        ...r,
+        base,
+        rem,
+        totalPairs: totalPairsByCommitment.get(r.cid) || 0, // tie-break
+      };
+    });
+
+    let used = tmp.reduce((s, r) => s + r.base, 0);
+    let remaining = Math.max(0, available - used);
+
+    // Largest remainder first, then bigger totalPairs wins, then bigger req
+    tmp.sort((a, b) => {
+      if (b.rem !== a.rem) return b.rem - a.rem;
+      if (b.totalPairs !== a.totalPairs) return b.totalPairs - a.totalPairs;
+      if (b.req !== a.req) return b.req - a.req;
+      return String(a.cid).localeCompare(String(b.cid));
+    });
+
+    // Distribute remaining 1-by-1
+    let idx = 0;
+    while (remaining > 0 && tmp.length) {
+      const r = tmp[idx];
+      if (r.base < r.req) {
+        r.base += 1;
+        remaining -= 1;
+      }
+      idx = (idx + 1) % tmp.length;
+      // prevents infinite loops if all bases already == req
+      if (idx === 0 && tmp.every((x) => x.base >= x.req)) break;
+    }
+
+    for (const r of tmp) updates.push({ id: r.lineId, fields: { [F.LINE_ALLOCATED_QTY]: r.base } });
+  }
+
+  // For lines not in requestedBySize (no counted qty), set allocated 0 (optional but clean)
+  for (const line of allLines) {
+    if (!updates.some((u) => u.id === line.id)) {
+      updates.push({ id: line.id, fields: { [F.LINE_ALLOCATED_QTY]: 0 } });
+    }
+  }
+
+  // Batch write
+  for (let i = 0; i < updates.length; i += 10) {
+    await linesTable.update(updates.slice(i, i + 10));
+  }
+
+  return { allocatedLines: updates.length };
+}
+
 function currencySymbol(code) {
   const c = String(code || "").toUpperCase();
   if (c === "EUR") return "€";
@@ -746,6 +865,42 @@ async function getCartLinesText(commitmentRecordId) {
   return items.map((x) => `• **${x.size}** × **${x.qty}**`).join(NL);
 }
 
+async function getAllocatedLinesText(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  const items = rows
+    .map((r) => ({
+      size: asText(r.fields[F.LINE_SIZE]),
+      qty: Number(r.fields[F.LINE_ALLOCATED_QTY] ?? 0),
+    }))
+    .filter((x) => x.size && Number.isFinite(x.qty) && x.qty > 0)
+    .sort((a, b) => a.size.localeCompare(b.size, undefined, { numeric: true }));
+
+  if (!items.length) return "_No allocated sizes._";
+  return items.map((x) => `• **${x.size}** × **${x.qty}**`).join(NL);
+}
+
+async function getAllocatedTotalQty(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  let total = 0;
+  for (const r of rows) {
+    const q = Number(r.fields?.[F.LINE_ALLOCATED_QTY] ?? 0);
+    if (Number.isFinite(q) && q > 0) total += q;
+  }
+  return total;
+}
+
 async function snapshotCountedQuantities(commitmentRecordId) {
   const rows = await linesTable
     .select({
@@ -1162,6 +1317,96 @@ function normalizePercentNumber(raw) {
   return n;
 }
 
+async function startDepositsFromAllocated(opportunityRecordId) {
+  const guildId = await inferGuildId();
+  if (!guildId) throw new Error("Could not infer main guild id");
+  const guild = await client.guilds.fetch(guildId);
+
+  const opp = await oppsTable.find(opportunityRecordId);
+  const oppFields = opp.fields || {};
+
+  // Create / fetch category in MAIN guild
+  const category = await ensureOppCategory(guild, opportunityRecordId, oppFields);
+  const staffRoleIds = parseCsvIds(STAFF_ROLE_IDS);
+
+  const commitments = await commitmentsTable
+    .select({
+      maxRecords: 1000,
+      filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}'`,
+    })
+    .all();
+
+  let channelsCreated = 0;
+  let cancelled = 0;
+
+  for (const c of commitments) {
+    const st = asText(c.fields[F.COM_STATUS]) || "";
+    if (st !== "Locked") continue;
+
+    // If allocation is 0 total pairs, cancel and skip channel creation
+    const allocTotal = await getAllocatedTotalQty(c.id);
+    if (!allocTotal) {
+      await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
+      cancelled++;
+      continue;
+    }
+
+    const buyerDiscordId = asText(c.fields[F.COM_DISCORD_USER_ID]);
+    const buyerTag = asText(c.fields[F.COM_DISCORD_USER_TAG]) || buyerDiscordId;
+    if (!buyerDiscordId) continue;
+
+    // reuse existing deal channel if already set
+    let dealChannel = null;
+    const existingDealChannelId = asText(c.fields[F.COM_DEAL_CHANNEL_ID]);
+    if (existingDealChannelId) {
+      dealChannel = await guild.channels.fetch(existingDealChannelId).catch(() => null);
+    }
+
+    const suffix = getCommitmentIdSuffix(c.fields) || opportunityRecordId.slice(-4);
+
+    if (!dealChannel) {
+      dealChannel = await ensureDealChannel({
+        guild,
+        categoryId: category.id,
+        buyerDiscordId,
+        buyerTag,
+        staffRoleIds,
+        nameSuffix: suffix,
+      });
+
+      await commitmentsTable.update(c.id, { [F.COM_DEAL_CHANNEL_ID]: String(dealChannel.id) });
+      channelsCreated++;
+    }
+
+    // Build deposit embed using ALLOCATED lines
+    const commitmentLinesText = await getAllocatedLinesText(c.id);
+
+    // Unit price: use Opp current sell price at close (already copied to commitments too)
+    const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+    const unit = Number(asText(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]));
+    const unitPrice = Number.isFinite(unit) ? unit : 0;
+
+    const totalAmount = allocTotal * unitPrice;
+    const depositPct = await getBuyerDepositPct(c.fields);
+
+    const embed = buildDepositEmbed({
+      oppFields,
+      commitmentLinesText,
+      currency,
+      unitPrice,
+      totalAmount,
+      depositPct,
+    });
+
+    const components = depositPct > 0 ? [buildDepositButtonRow(c.id, true)] : [];
+
+    // send or edit deposit message (optional: you can store message id later)
+    await dealChannel.send({ embeds: [embed], components });
+  }
+
+  return { channelsCreated, cancelled };
+}
+
 async function getBuyerDepositPct(commitmentFields) {
   // 1) Commitment override (Deposit % on the commitment record)
   const fromCommitment = normalizePercentNumber(commitmentFields?.[F.COM_DEPOSIT_PCT]);
@@ -1511,6 +1756,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await oppsTable.update(oppRecordId, {
       [F.OPP_FINAL_QUOTE]: workingJson,
     });
+
+    // 1) Allocate lines
+    await allocateFromFinalQuote(oppRecordId);
+
+    // 2) Start deposits (create buyer channels + deposit embeds)
+    await startDepositsFromAllocated(oppRecordId);
 
     // Disable buttons on supplier message (optional)
     try {
