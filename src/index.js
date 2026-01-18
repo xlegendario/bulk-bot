@@ -800,7 +800,7 @@ async function buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, l
 ========================= */
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   partials: [Partials.Channel],
 });
 
@@ -1584,24 +1584,52 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
   const baseName = safeChannelName(buyerTag) + (nameSuffix ? `-${nameSuffix}` : "");
   const channelName = baseName.slice(0, 90);
 
-  // ✅ Validate buyerDiscordId BEFORE permissionOverwrites
+  // ✅ Validate buyerDiscordId
   const buyerId = String(buyerDiscordId || "").trim();
   if (!/^[0-9]{17,20}$/.test(buyerId)) {
     throw new Error(`Invalid buyerDiscordId for deal channel: "${buyerDiscordId}"`);
   }
 
+  // ✅ Force the buyer member into cache (important when you don't have GuildMembers intent)
+  const buyerMember = await guild.members.fetch(buyerId).catch(() => null);
+  if (!buyerMember) {
+    throw new Error(`Buyer is not a member of this guild or cannot be fetched: ${buyerId}`);
+  }
+
+  // ✅ Fetch bot member
   const me = await getGuildMe(guild);
+
+  // ✅ Force staff roles into cache (and keep only valid ones)
+  const validStaffRoleIds = [];
+  for (const ridRaw of staffRoleIds || []) {
+    const rid = String(ridRaw || "").trim();
+    if (!/^[0-9]{17,20}$/.test(rid)) {
+      console.warn("Skipping invalid STAFF_ROLE_ID:", ridRaw);
+      continue;
+    }
+
+    const role = await guild.roles.fetch(rid).catch(() => null);
+    if (!role) {
+      console.warn("Skipping STAFF_ROLE_ID not found in this guild:", rid);
+      continue;
+    }
+    validStaffRoleIds.push(role.id);
+  }
 
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+
+    // ✅ Use fetched buyerMember.id (guaranteed resolvable)
     {
-      id: buyerDiscordId,
+      id: buyerMember.id,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
         PermissionsBitField.Flags.ReadMessageHistory,
       ],
     },
+
+    // Bot itself
     {
       id: me.id,
       allow: [
@@ -1613,13 +1641,8 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
     },
   ];
 
-    for (const ridRaw of staffRoleIds) {
-    const rid = String(ridRaw || "").trim();
-    if (!/^[0-9]{17,20}$/.test(rid)) {
-      console.warn("Skipping invalid STAFF_ROLE_ID:", ridRaw);
-      continue;
-    }
-
+  // Staff roles
+  for (const rid of validStaffRoleIds) {
     overwrites.push({
       id: rid,
       allow: [
@@ -1638,6 +1661,7 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
     permissionOverwrites: overwrites,
   });
 }
+
 
 function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct, note }) {
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk";
