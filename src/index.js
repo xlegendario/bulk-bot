@@ -284,6 +284,10 @@ function quoteMapToLines(map) {
   return arr.map(([s, q]) => `${s}×${q}`).join("\n") || "(none)";
 }
 
+function isSnowflakeId(x) {
+  return typeof x === "string" && /^[0-9]{17,20}$/.test(x.trim());
+}
+
 function quoteMapToTotals(map) {
   const entries = Array.from(map.entries())
     .map(([s, q]) => [String(s), Number(q) || 0])
@@ -1580,6 +1584,12 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
   const baseName = safeChannelName(buyerTag) + (nameSuffix ? `-${nameSuffix}` : "");
   const channelName = baseName.slice(0, 90);
 
+  // ✅ Validate buyerDiscordId BEFORE permissionOverwrites
+  const buyerId = String(buyerDiscordId || "").trim();
+  if (!/^[0-9]{17,20}$/.test(buyerId)) {
+    throw new Error(`Invalid buyerDiscordId for deal channel: "${buyerDiscordId}"`);
+  }
+
   const me = await getGuildMe(guild);
 
   const overwrites = [
@@ -1603,7 +1613,13 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
     },
   ];
 
-  for (const rid of staffRoleIds) {
+    for (const ridRaw of staffRoleIds) {
+    const rid = String(ridRaw || "").trim();
+    if (!/^[0-9]{17,20}$/.test(rid)) {
+      console.warn("Skipping invalid STAFF_ROLE_ID:", ridRaw);
+      continue;
+    }
+
     overwrites.push({
       id: rid,
       allow: [
