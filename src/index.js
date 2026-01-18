@@ -262,6 +262,15 @@ function quoteFieldToMap(fieldValue) {
   return m;
 }
 
+function quoteMapToLinesQtyFirst(map) {
+  const arr = Array.from(map.entries())
+    .map(([s, q]) => [String(s), Number(q) || 0])
+    .filter(([_, q]) => q > 0)
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  return arr.length ? arr.map(([s, q]) => `${q}x ${s}`).join(NL) : "(none)";
+}
+
 function mapToQuoteJson(map) {
   const obj = {};
   for (const [k, v] of map.entries()) obj[String(k)] = Number(v) || 0;
@@ -1291,20 +1300,39 @@ function buildSizeButtons(opportunityRecordId, sizes, status) {
   return rows;
 }
 
-function buildSupplierDraftEmbed({ oppFields, requestedMap, workingMap }) {
+function buildSupplierDraftEmbed({ oppFields, requestedMap, workingMap, variant }) {
+  // variant: "supplier" | "admin"
   const oppId = asText(oppFields["Opportunity ID"]);
   const bulkId = toBulkId(oppId || "");
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+
+  const requestedText = quoteMapToLinesQtyFirst(requestedMap);
+  const availableText = quoteMapToLinesQtyFirst(workingMap);
+
+  const footerText =
+    variant === "supplier"
+      ? "Please confirm or adjust available pairs."
+      : "Waiting for the supplier to confirm available pairs.";
+
+  const desc = [
+    `**${bulkId || "BULK"}**`,
+    "",
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+  ].join(NL);
 
   return new EmbedBuilder()
-    .setTitle("📩 Incoming Quote (Supplier)")
-    .setDescription(`**${bulkId || "BULK"}** — ${product}`)
+    .setTitle("📩 Incoming Quote")
+    .setDescription(desc)
     .setColor(0xffd300)
     .addFields(
-      { name: "Requested (buyers)", value: quoteMapToLines(requestedMap), inline: false },
-      { name: "Available (supplier)", value: quoteMapToLines(workingMap), inline: false }
-    );
+      { name: "Requested", value: requestedText, inline: false },
+      { name: "Available", value: availableText, inline: false }
+    )
+    .setFooter({ text: footerText });
 }
+
 
 function buildSupplierMainRow(oppRecordId, disabled = false) {
   return new ActionRowBuilder().addComponents(
@@ -1780,14 +1808,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       String(a).localeCompare(String(b), undefined, { numeric: true })
     );
 
-    const embed = buildSupplierDraftEmbed({ oppFields, requestedMap, workingMap });
+    const supplierEmbed = buildSupplierDraftEmbed({
+      oppFields,
+      requestedMap,
+      workingMap,
+      variant: "supplier",
+    });
 
     const rows = [
       buildSupplierMainRow(oppRecordId, false),
       ...buildSupplierSizeRows(oppRecordId, sizes, false),
     ];
 
-    await interaction.message.edit({ embeds: [embed], components: rows });
+    await interaction.message.edit({ embeds: [supplierEmbed], components: rows });
     return;
   }
 
@@ -1856,10 +1889,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await oppsTable.update(oppRecordId, { [F.OPP_SUPPLIER_QUOTE_WORKING]: workingJson });
 
     // Rebuild embed
-    const embed = buildSupplierDraftEmbed({
+    const supplierEmbed = buildSupplierDraftEmbed({
       oppFields,
       requestedMap,
       workingMap,
+      variant: "supplier",
+    });
+
+    const adminEmbed = buildSupplierDraftEmbed({
+      oppFields,
+      requestedMap,
+      workingMap,
+      variant: "admin",
     });
 
     const sizes = Array.from(requestedMap.keys()).sort((a, b) =>
@@ -1878,7 +1919,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (supplierCh?.isTextBased()) {
           const m = await supplierCh.messages.fetch(String(supplierMsgId)).catch(() => null);
-          if (m) await m.edit({ embeds: [embed], components: rows });
+          if (m) await m.edit({ embeds: [supplierEmbed], components: rows });
         }
       }
     } catch {}
@@ -1890,7 +1931,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const adminCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
         if (adminCh?.isTextBased()) {
           const m = await adminCh.messages.fetch(String(adminMsgId)).catch(() => null);
-          if (m) await m.edit({ embeds: [embed] });
+          if (m) await m.edit({ embeds: [adminEmbed] });
         }
       }
     } catch {}
@@ -2568,17 +2609,18 @@ app.post("/sync-opportunity-dms", async (req, res) => {
 app.post("/close-opportunity", async (req, res) => {
   try {
     if (!assertSecret(req, res)) return;
+
     const { opportunityRecordId } = req.body || {};
     if (!opportunityRecordId) {
       return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
-    // MAIN KC guild (still needed to mark statuses / later stages)
     const guildId = await inferGuildId();
     if (!guildId) {
       return res.status(500).json({ ok: false, error: "Could not infer guild id" });
     }
-    await client.guilds.fetch(guildId); // keep for permission sanity (not used yet in step 2)
+    // main guild fetch (keeps parity with rest of system; also used for syncPublic/syncDms)
+    await client.guilds.fetch(guildId);
 
     // ---- Load opportunity ----
     const opp = await oppsTable.find(opportunityRecordId);
@@ -2587,13 +2629,11 @@ app.post("/close-opportunity", async (req, res) => {
     // Close the opportunity
     await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
 
-    // Copy final unit price to commitments (you already do this)
-    const finalUnit = parseMoneyNumber(
-      oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]
-    );
+    // Copy final unit price to commitments (keeps your existing behavior)
+    const finalUnit = parseMoneyNumber(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
     await setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, finalUnit);
 
-    // ---- Load all commitments ----
+    // ---- Load all commitments for this opportunity ----
     const commitments = await commitmentsTable
       .select({
         maxRecords: 1000,
@@ -2604,7 +2644,7 @@ app.post("/close-opportunity", async (req, res) => {
     let locked = 0;
     let cancelled = 0;
 
-    // ---- Lock/cancel only (NO deal channels, NO deposit embeds) ----
+    // ---- Lock/cancel only (NO deal channels, NO deposits here anymore) ----
     for (const c of commitments) {
       const st = asText(c.fields[F.COM_STATUS]) || "";
 
@@ -2620,26 +2660,18 @@ app.post("/close-opportunity", async (req, res) => {
         continue;
       }
 
-      if (st === "Locked") {
-        locked++;
-      }
+      if (st === "Locked") locked++;
     }
 
     // ---- Build Requested Quote from locked commitments (Counted Quantity) ----
     const lockedCommitmentIds = commitments
       .filter((c) => {
         const st = asText(c.fields[F.COM_STATUS]) || "";
-        // note: c.fields might be stale for those we updated above,
-        // but "Locked" was already Locked, and Submitted/Editing got locked.
-        // We want both: Locked + (Submitted/Editing that we just locked)
         return st === "Locked" || st === "Submitted" || st === "Editing";
       })
       .map((c) => c.id);
 
-    const requestedMap = await buildRequestedQuoteMapForLockedCommitments(
-      opportunityRecordId,
-      lockedCommitmentIds
-    );
+    const requestedMap = await buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, lockedCommitmentIds);
 
     const requestedJson = mapToQuoteJson(requestedMap);
 
@@ -2647,9 +2679,11 @@ app.post("/close-opportunity", async (req, res) => {
     await oppsTable.update(opportunityRecordId, {
       [F.OPP_REQUESTED_QUOTE]: requestedJson,
       [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
+      // optional (if you use it later)
+      // [F.OPP_SUPPLIER_QUOTE_STATUS]: "Pending",
     });
 
-    // Re-fetch opp fields for message IDs
+    // Re-fetch oppFields so we have fresh values (message IDs etc.)
     const oppFresh = await oppsTable.find(opportunityRecordId);
     const oppFreshFields = oppFresh.fields || {};
 
@@ -2658,7 +2692,6 @@ app.post("/close-opportunity", async (req, res) => {
 
     const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
     const { requestedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFreshFields);
-
     if (!requestedQuotesChId) throw new Error("Requested Quotes Channel ID missing on Supplier record");
 
     const supplierCh = await supplierGuild.channels.fetch(String(requestedQuotesChId)).catch(() => null);
@@ -2667,13 +2700,23 @@ app.post("/close-opportunity", async (req, res) => {
     }
 
     const workingMap = requestedMap;
-    const draftEmbed = buildSupplierDraftEmbed({
+
+    // ✅ Build BOTH versions (supplier + admin mirror)
+    const supplierEmbed = buildSupplierDraftEmbed({
       oppFields: oppFreshFields,
       requestedMap,
       workingMap,
+      variant: "supplier",
     });
 
-    // Edit existing supplier message or send new
+    const adminEmbed = buildSupplierDraftEmbed({
+      oppFields: oppFreshFields,
+      requestedMap,
+      workingMap,
+      variant: "admin",
+    });
+
+    // --- Supplier message: edit existing or send new
     const existingSupplierMsgId = asText(oppFreshFields[F.OPP_SUPPLIER_QUOTE_MSG_ID]);
     let supplierMsg = null;
 
@@ -2681,7 +2724,7 @@ app.post("/close-opportunity", async (req, res) => {
       try {
         supplierMsg = await supplierCh.messages.fetch(existingSupplierMsgId);
         await supplierMsg.edit({
-          embeds: [draftEmbed],
+          embeds: [supplierEmbed],
           components: [buildSupplierMainRow(opportunityRecordId, false)],
         });
       } catch {}
@@ -2689,7 +2732,7 @@ app.post("/close-opportunity", async (req, res) => {
 
     if (!supplierMsg) {
       supplierMsg = await supplierCh.send({
-        embeds: [draftEmbed],
+        embeds: [supplierEmbed],
         components: [buildSupplierMainRow(opportunityRecordId, false)],
       });
 
@@ -2698,18 +2741,19 @@ app.post("/close-opportunity", async (req, res) => {
       });
     }
 
-    // ---- Admin draft mirror (read-only) ----
+    // --- Admin draft mirror (read-only)
     if (ADMIN_DRAFT_QUOTES_CHANNEL_ID) {
       const adminDraftCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
       if (adminDraftCh && adminDraftCh.isTextBased()) {
         const existingAdminMsgId = asText(oppFreshFields[F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]);
+
         if (existingAdminMsgId) {
           try {
             const m = await adminDraftCh.messages.fetch(existingAdminMsgId);
-            await m.edit({ embeds: [draftEmbed] });
+            await m.edit({ embeds: [adminEmbed] });
           } catch {}
         } else {
-          const m = await adminDraftCh.send({ embeds: [draftEmbed] });
+          const m = await adminDraftCh.send({ embeds: [adminEmbed] });
           await oppsTable.update(opportunityRecordId, {
             [F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]: String(m.id),
           });
@@ -2717,7 +2761,7 @@ app.post("/close-opportunity", async (req, res) => {
       }
     }
 
-    // Optional: lock public + DM buttons visually
+    // ---- Sync public + DMs so UI locks visually ----
     await syncPublic(opportunityRecordId);
     await syncDms(opportunityRecordId);
 
