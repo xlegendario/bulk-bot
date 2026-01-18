@@ -1200,25 +1200,20 @@ function buildOpportunityEmbed(fields) {
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
 
-    "", // space after basics
-
+    "",
     etaLine || null,
 
-    "", // space after ETA
+    "",
+    `**Current Price:** **${currentPrice}**`,
+    `**Current Discount:** **${currentDiscount}**`,
+    `**Current Total Pairs:** **${currentTotalPairs}**`,
 
-    `**Current Price:** ${formatMoney(currency, currentPrice)}`,
-    `**Current Discount:** ${currentDiscount}%`,
-    `**Current Total Pairs:** ${currentTotalPairs || "—"}`,
+    "",
+    `**MOQ for Next Tier:** **${nextMinPairs}**`,
+    `**Next Tier Discount:** **${nextDiscount}**`,
 
-    "", // space before next tier
-
-    `**MOQ for Next Tier:** ${nextTierMoq}`,
-    `**Next Tier Discount:** ${nextTierDiscount}%`,
-
-    "", // space before close timer
-
-    `**Closes:** ${closesInText}`,
-
+    "",
+    `**Closes:** **${closeCountdown}**`,
   ].filter(Boolean).join(NL);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
