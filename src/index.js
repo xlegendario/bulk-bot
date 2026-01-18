@@ -697,10 +697,12 @@ async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
   const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
   if (!ladder) return embed;
 
+  // ✅ extra polish spacer BEFORE the ladder
+  embed.addFields({ name: "\u200B", value: "\u200B", inline: false });
+
   embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
   return embed;
 }
-
 
 function buildOrFormula(fieldName, values) {
   const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
@@ -1199,20 +1201,7 @@ function buildOpportunityEmbed(fields) {
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
-
-    "",
-    etaLine || null,
-
-    "",
-    `**Current Price:** **${currentPrice}**`,
-    `**Current Discount:** **${currentDiscount}**`,
-    `**Current Total Pairs:** **${currentTotalPairs}**`,
-
-    "",
-    `**MOQ for Next Tier:** **${nextMinPairs}**`,
-    `**Next Tier Discount:** **${nextDiscount}**`,
-
-    "",
+    etaLine ? `**${etaLine}**` : null,
     `**Closes:** **${closeCountdown}**`,
   ].filter(Boolean).join(NL);
 
@@ -1223,6 +1212,26 @@ function buildOpportunityEmbed(fields) {
     .setDescription(desc)
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
+
+  embed.addFields(
+    {
+      name: "💰 Current",
+      value: [
+        `Price: **${currentPrice}**`,
+        `Discount: **${currentDiscount}**`,
+        `Total pairs: **${currentTotalPairs}**`,
+      ].join(NL),
+      inline: true,
+    },
+    {
+      name: "🎯 Next tier",
+      value: [
+        `MOQ: **${nextMinPairs}**`,
+        `Discount: **${nextDiscount}**`,
+      ].join(NL),
+      inline: true,
+    }
+  );
 
   if (picUrl) embed.setThumbnail(picUrl);
   return embed;
