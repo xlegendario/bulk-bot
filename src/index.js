@@ -246,9 +246,8 @@ function formatEtaBusinessDays(v) {
   const n = Number(asText(v));
   if (!Number.isFinite(n) || n <= 0) return "";
   const days = Math.round(n);
-  return `Estimated delivery: **${days} business day${days === 1 ? "" : "s"}** after supplier confirmation.`;
+  return `ETA: ${days} business day${days === 1 ? "" : "s"}`;
 }
-
 
 // Our quote storage format is JSON in long-text fields:
 // { "36": 7, "36.5": 3, ... }
@@ -1200,16 +1199,26 @@ function buildOpportunityEmbed(fields) {
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
-    etaLine ? `**ETA:** ${etaLine}` : null,
-    "",
-    `**Current Price:** **${currentPrice}**`,
-    `**Current Discount:** **${currentDiscount}**`,
-    `**Current Total Pairs:** **${currentTotalPairs}**`,
-    "",
-    `**MOQ for Next Tier:** **${nextMinPairs}**`,
-    `**Next Tier Discount:** **${nextDiscount}**`,
-    "",
-    `**Closes:** **${closeCountdown}**`,
+
+    "", // space after basics
+
+    etaLine || null,
+
+    "", // space after ETA
+
+    `**Current Price:** ${formatMoney(currency, currentPrice)}`,
+    `**Current Discount:** ${currentDiscount}%`,
+    `**Current Total Pairs:** ${currentTotalPairs || "—"}`,
+
+    "", // space before next tier
+
+    `**MOQ for Next Tier:** ${nextTierMoq}`,
+    `**Next Tier Discount:** ${nextTierDiscount}%`,
+
+    "", // space before close timer
+
+    `**Closes:** ${closesInText}`,
+
   ].filter(Boolean).join(NL);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
