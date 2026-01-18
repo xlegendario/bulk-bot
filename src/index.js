@@ -698,8 +698,6 @@ async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
   if (!ladder) return embed;
 
   // ✅ extra polish spacer BEFORE the ladder
-  embed.addFields({ name: "\u200B", value: "\u200B", inline: false });
-
   embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
   return embed;
 }
@@ -1187,21 +1185,37 @@ function buildOpportunityEmbed(fields) {
   const minSize = asText(fields[F.OPP_MIN_SIZE]) || "—";
   const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
-  const etaLine = formatEtaBusinessDays(fields[F.OPP_ETA_BUSINESS_DAYS]);
 
+  const etaLine = formatEtaBusinessDays(fields[F.OPP_ETA_BUSINESS_DAYS]); // "ETA: 5 business days"
   const currentPrice = formatMoney(currency, fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]);
   const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
   const currentTotalPairs = asText(fields[F.OPP_CURRENT_TOTAL_PAIRS]) || "—";
   const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
   const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]) || "—";
+
   const picUrl = getAirtableAttachmentUrl(fields[F.OPP_PICTURE]);
   const closeAtUnix = toUnixSecondsFromAirtableDate(fields[F.OPP_CLOSE_AT]);
   const closeCountdown = fmtDiscordRelative(closeAtUnix);
 
+  const SP = "\u200B"; // reliable visual spacer line in Discord embeds
+
   const desc = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
+
+    SP,
     etaLine ? `**${etaLine}**` : null,
+
+    SP,
+    `**Current Price:** **${currentPrice}**`,
+    `**Current Discount:** **${currentDiscount}**`,
+    `**Current Total Pairs:** **${currentTotalPairs}**`,
+
+    SP,
+    `**MOQ for Next Tier:** **${nextMinPairs}**`,
+    `**Next Tier Discount:** **${nextDiscount}**`,
+
+    SP,
     `**Closes:** **${closeCountdown}**`,
   ].filter(Boolean).join(NL);
 
@@ -1212,26 +1226,6 @@ function buildOpportunityEmbed(fields) {
     .setDescription(desc)
     .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
-
-  embed.addFields(
-    {
-      name: "💰 Current",
-      value: [
-        `Price: **${currentPrice}**`,
-        `Discount: **${currentDiscount}**`,
-        `Total pairs: **${currentTotalPairs}**`,
-      ].join(NL),
-      inline: true,
-    },
-    {
-      name: "🎯 Next tier",
-      value: [
-        `MOQ: **${nextMinPairs}**`,
-        `Discount: **${nextDiscount}**`,
-      ].join(NL),
-      inline: true,
-    }
-  );
 
   if (picUrl) embed.setThumbnail(picUrl);
   return embed;
