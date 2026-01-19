@@ -2790,63 +2790,87 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SKUREQ.MODAL}:`)) {
-      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
-        return;
-      }
-
-      const bulkRequestRecordId = interaction.customId.split(":")[1];
-
-      const minSize = interaction.fields.getTextInputValue(SKUREQ.MIN).trim();
-      const maxSize = interaction.fields.getTextInputValue(SKUREQ.MAX).trim();
-      const unitPrice = parseMoneyNumber(interaction.fields.getTextInputValue(SKUREQ.PRICE));
-      const etaDays = Number.parseInt(interaction.fields.getTextInputValue(SKUREQ.ETA), 10);
-
-      if (!minSize || !maxSize || unitPrice == null || !Number.isFinite(etaDays) || etaDays <= 0) {
-        await interaction.reply({ content: "❌ Please fill all fields correctly.", flags: MessageFlags.Ephemeral });
-        return;
-      }
-
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      // Find supplier record by supplier Discord user id
-      const supplierDiscordId = interaction.user.id;
-      const supplierMatches = await suppliersTable
-        .select({
-          maxRecords: 1,
-          filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
-        })
-        .firstPage();
-
-      const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
-
-      const patch = {
-        [F.BR_MIN_SIZE]: minSize,
-        [F.BR_MAX_SIZE]: maxSize,
-        [F.BR_UNIT_PRICE]: Number(unitPrice.toFixed(2)),
-        [F.BR_ETA_DAYS]: Math.round(etaDays),
-        [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
-        [F.BR_REQUEST_STATUS]: "Supplier Responded",
-      };
-
-      if (supplierRecordId) {
-        patch[F.BR_SUPPLIER_LINK] = [supplierRecordId];
-      }
-
-      await bulkRequestsTable.update(bulkRequestRecordId, patch);
-
-      // Disable buttons on the supplier message
       try {
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("disabled").setLabel("Quote Submitted ✓").setStyle(ButtonStyle.Success).setDisabled(true)
-        );
-        await interaction.message.edit({ components: [row] });
-      } catch {}
+        if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+          await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+          return;
+        }
 
-      await interaction.editReply("✅ Quote submitted.");
-      return;
+        const bulkRequestRecordId = interaction.customId.split(":")[1];
+        if (!bulkRequestRecordId) {
+          await interaction.reply({ content: "❌ Missing request id.", flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        const minSize = interaction.fields.getTextInputValue(SKUREQ.MIN).trim();
+        const maxSize = interaction.fields.getTextInputValue(SKUREQ.MAX).trim();
+        const unitPrice = parseMoneyNumber(interaction.fields.getTextInputValue(SKUREQ.PRICE));
+        const etaDays = Number.parseInt(interaction.fields.getTextInputValue(SKUREQ.ETA), 10);
+
+        if (!minSize || !maxSize || unitPrice == null || !Number.isFinite(etaDays) || etaDays <= 0) {
+          await interaction.reply({ content: "❌ Please fill all fields correctly.", flags: MessageFlags.Ephemeral });
+          return;
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        // Find supplier record by supplier Discord user id
+        const supplierDiscordId = interaction.user.id;
+
+        const supplierMatches = await suppliersTable
+          .select({
+            maxRecords: 1,
+            filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
+          })
+          .firstPage();
+
+        const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
+
+        const patch = {
+          [F.BR_MIN_SIZE]: minSize,
+          [F.BR_MAX_SIZE]: maxSize,
+          [F.BR_UNIT_PRICE]: Number(unitPrice.toFixed(2)),
+          [F.BR_ETA_DAYS]: Math.round(etaDays),
+          [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
+          [F.BR_REQUEST_STATUS]: "Supplier Responded",
+        };
+
+        // Only set link if supplier record found
+        if (supplierRecordId) {
+          patch[F.BR_SUPPLIER_LINK] = [supplierRecordId];
+        } else {
+          console.warn("Supplier record not found for Discord user:", supplierDiscordId);
+        }
+
+        await bulkRequestsTable.update(bulkRequestRecordId, patch);
+
+        // Disable buttons on the supplier message
+        try {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("disabled")
+              .setLabel("Quote Submitted ✓")
+              .setStyle(ButtonStyle.Success)
+              .setDisabled(true)
+          );
+          await interaction.message.edit({ components: [row] });
+        } catch {}
+
+        await interaction.editReply("✅ Quote submitted.");
+        return;
+      } catch (err) {
+        console.error("SKUREQ.MODAL failed:", err);
+        try {
+          // try to respond even if deferReply didn't happen
+          if (interaction.deferred || interaction.replied) {
+            await interaction.editReply("❌ Something went wrong saving your quote. Please try again.");
+          } else {
+            await interaction.reply({ content: "❌ Something went wrong saving your quote. Please try again.", flags: MessageFlags.Ephemeral });
+          }
+        } catch {}
+        return;
+      }
     }
-  }
 });
 
 /* =========================
@@ -3209,7 +3233,6 @@ app.post("/dispatch-bulk-request", async (req, res) => {
           [
             `**SKU:** \`${sku}\``,
             `**Quantity:** **${qty}**`,
-            target ? `**Buyer Target:** **${target}**` : null,
           ].filter(Boolean).join(NL)
         )
         .setFooter({ text: "Reply with Quote Bulk or Deny" });
