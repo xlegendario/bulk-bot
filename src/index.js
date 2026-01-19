@@ -2041,10 +2041,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setCustomId(`${SKUREQ.MODAL}:${bulkRequestRecordId}`)
         .setTitle("Submit Supplier Quote");
 
-      const min = new TextInputBuilder().setCustomId(SKUREQ.MIN).setLabel("Min Size").setStyle(TextInputStyle.Short).setRequired(true);
-      const max = new TextInputBuilder().setCustomId(SKUREQ.MAX).setLabel("Max Size").setStyle(TextInputStyle.Short).setRequired(true);
-      const price = new TextInputBuilder().setCustomId(SKUREQ.PRICE).setLabel("Unit Price").setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("e.g. 120");
-      const eta = new TextInputBuilder().setCustomId(SKUREQ.ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("e.g. 5");
+      const min = new TextInputBuilder()
+        .setCustomId(SKUREQ.MIN)
+        .setLabel("Min Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const max = new TextInputBuilder()
+        .setCustomId(SKUREQ.MAX)
+        .setLabel("Max Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const price = new TextInputBuilder()
+        .setCustomId(SKUREQ.PRICE)
+        .setLabel("Unit Price")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 120");
+
+      const eta = new TextInputBuilder()
+        .setCustomId(SKUREQ.ETA)
+        .setLabel("ETA (Business Days)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 5");
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(min),
@@ -2062,7 +2083,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch {}
       return;
     }
-  }  
+  }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SUPQ.MODAL}:`)) {
     // supq_modal:<oppId>:<size>
@@ -2112,7 +2133,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const sizes = Array.from(requestedMap.keys()).sort((a, b) =>
       String(a).localeCompare(String(b), undefined, { numeric: true })
     );
-    const rows = [buildSupplierMainRow(oppRecordId, false), ...buildSupplierSizeRows(oppRecordId, sizes, false)];
+
+    const rows = [
+      buildSupplierMainRow(oppRecordId, false),
+      ...buildSupplierSizeRows(oppRecordId, sizes, false),
+    ];
 
     // Update supplier message reliably (don’t depend on modal having message)
     try {
@@ -2206,16 +2231,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const depositPct = await getBuyerDepositPct(c.fields);
 
     const newStatus = depositPct >= 100 ? "Paid" : "Deposit Paid";
-    const label = newStatus === "Paid" ? "Paid ✓" : "Deposit Paid ✓";
     await commitmentsTable.update(commitmentId, { [F.COM_STATUS]: newStatus });
 
     // Disable button
     try {
       const embed0 = interaction.message.embeds?.[0];
       const newEmbed = embed0 ? EmbedBuilder.from(embed0).setFooter({ text: "✅ Deposit confirmed by staff" }) : null;
+
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`deposit_confirm:${commitmentId}`).setLabel("Deposit Paid ✓").setStyle(ButtonStyle.Success).setDisabled(true)
+        new ButtonBuilder()
+          .setCustomId(`deposit_confirm:${commitmentId}`)
+          .setLabel("Deposit Paid ✓")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(true)
       );
+
       await interaction.message.edit({ embeds: newEmbed ? [newEmbed] : [], components: [row] });
     } catch {}
 
@@ -2223,77 +2253,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  if (interaction.isButton() && interaction.customId === REQ.BTN_OPEN) {
-    const modal = new ModalBuilder().setCustomId(REQ.MODAL).setTitle("Submit Bulk Request");
-
-    const sku = new TextInputBuilder()
-      .setCustomId(REQ.SKU)
-      .setLabel("SKU (required)")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setPlaceholder("e.g. HV0823-200");
-
-    const qty = new TextInputBuilder()
-      .setCustomId(REQ.QTY)
-      .setLabel("Quantity (pairs) (required)")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setPlaceholder("e.g. 50");
-
-    const price = new TextInputBuilder()
-      .setCustomId(REQ.PRICE)
-      .setLabel("Buyer Target Price (per unit) (required)")
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setPlaceholder("e.g. 140 or €140");
-
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(sku),
-      new ActionRowBuilder().addComponents(qty),
-      new ActionRowBuilder().addComponents(price)
-    );
-  
-    await interaction.showModal(modal);
-    return;
-  }
-
-  if (interaction.isModalSubmit() && interaction.customId === REQ.MODAL) {
-    const skuRaw = interaction.fields.getTextInputValue(REQ.SKU)?.trim();
-    const qtyRaw = interaction.fields.getTextInputValue(REQ.QTY)?.trim();
-    const priceRaw = interaction.fields.getTextInputValue(REQ.PRICE)?.trim();
-
-    const qty = Number.parseInt(qtyRaw, 10);
-    const buyerTargetPrice = parseMoneyNumber(priceRaw);
-
-    if (!skuRaw) {
-      await interaction.reply({ content: "❌ SKU is required.", flags: MessageFlags.Ephemeral });
-      return;
-    }
-    if (!Number.isFinite(qty) || qty <= 0) {
-      await interaction.reply({ content: "❌ Quantity must be a positive number.", flags: MessageFlags.Ephemeral });
-      return;
-    }
-    if (buyerTargetPrice === null || !Number.isFinite(buyerTargetPrice) || buyerTargetPrice <= 0) {
-      await interaction.reply({
-        content: "❌ Target price must be a valid positive number (e.g. 140 or €140).",
-        flags: MessageFlags.Ephemeral,
-      });
-      return;
-    }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-    try {
-      const res = await upsertBulkRequest({ skuRaw, qty, buyerTargetPrice });
-      await interaction.editReply(`✅ Request ${res.action}.`);
-    } catch (e) {
-      console.error("Bulk request submit failed:", e);
-      await interaction.editReply("❌ Something went wrong while saving your request.");
-    }
-    return;
-  }
-
-    // Staff confirm remaining paid button
+  // Staff confirm remaining paid button
   if (interaction.isButton() && interaction.customId.startsWith("paid_confirm:")) {
     const commitmentId = interaction.customId.split("paid_confirm:")[1];
 
@@ -2336,6 +2296,79 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Bulk request open modal
+  if (interaction.isButton() && interaction.customId === REQ.BTN_OPEN) {
+    const modal = new ModalBuilder().setCustomId(REQ.MODAL).setTitle("Submit Bulk Request");
+
+    const sku = new TextInputBuilder()
+      .setCustomId(REQ.SKU)
+      .setLabel("SKU (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. HV0823-200");
+
+    const qty = new TextInputBuilder()
+      .setCustomId(REQ.QTY)
+      .setLabel("Quantity (pairs) (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. 50");
+
+    const price = new TextInputBuilder()
+      .setCustomId(REQ.PRICE)
+      .setLabel("Buyer Target Price (per unit) (required)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder("e.g. 140 or €140");
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(sku),
+      new ActionRowBuilder().addComponents(qty),
+      new ActionRowBuilder().addComponents(price)
+    );
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  // Bulk request submit modal
+  if (interaction.isModalSubmit() && interaction.customId === REQ.MODAL) {
+    const skuRaw = interaction.fields.getTextInputValue(REQ.SKU)?.trim();
+    const qtyRaw = interaction.fields.getTextInputValue(REQ.QTY)?.trim();
+    const priceRaw = interaction.fields.getTextInputValue(REQ.PRICE)?.trim();
+
+    const qty = Number.parseInt(qtyRaw, 10);
+    const buyerTargetPrice = parseMoneyNumber(priceRaw);
+
+    if (!skuRaw) {
+      await interaction.reply({ content: "❌ SKU is required.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0) {
+      await interaction.reply({ content: "❌ Quantity must be a positive number.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (buyerTargetPrice === null || !Number.isFinite(buyerTargetPrice) || buyerTargetPrice <= 0) {
+      await interaction.reply({
+        content: "❌ Target price must be a valid positive number (e.g. 140 or €140).",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      const res = await upsertBulkRequest({ skuRaw, qty, buyerTargetPrice });
+      await interaction.editReply(`✅ Request ${res.action}.`);
+    } catch (e) {
+      console.error("Bulk request submit failed:", e);
+      await interaction.editReply("❌ Something went wrong while saving your request.");
+    }
+    return;
+  }
+
+  // Fullrun button -> modal
   if (interaction.isButton() && interaction.customId.startsWith("fullrun:")) {
     const oppRecordId = interaction.customId.split("fullrun:")[1];
 
@@ -2370,6 +2403,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Fullrun modal submit
   if (interaction.isModalSubmit() && interaction.customId.startsWith("fullrun_modal:")) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -2521,7 +2555,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Locked indicator
   if (interaction.isButton() && interaction.customId.startsWith("cart_locked:")) {
-    await interaction.reply({ content: "🔒 This commitment is locked. Contact staff if you need changes.", ...deferEphemeralIfGuild(inGuild) });
+    await interaction.reply({
+      content: "🔒 This commitment is locked. Contact staff if you need changes.",
+      ...deferEphemeralIfGuild(inGuild),
+    });
     return;
   }
 
@@ -2539,8 +2576,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
-    const modal = new ModalBuilder().setCustomId(`qty_modal:${oppRecordId}:${encodedSize}`).setTitle(`Quantity for ${size}`);
-    const qtyInput = new TextInputBuilder().setCustomId("qty").setLabel("Quantity (0 to remove)").setStyle(TextInputStyle.Short).setRequired(true);
+    const modal = new ModalBuilder()
+      .setCustomId(`qty_modal:${oppRecordId}:${encodedSize}`)
+      .setTitle(`Quantity for ${size}`);
+
+    const qtyInput = new TextInputBuilder()
+      .setCustomId("qty")
+      .setLabel("Quantity (0 to remove)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
     modal.addComponents(new ActionRowBuilder().addComponents(qtyInput));
     await interaction.showModal(modal);
     return;
@@ -2566,7 +2611,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!commitment) {
       const buyer = await upsertBuyer(interaction.user);
       commitment = await createCommitment({
-        oppRecordId: oppRecordId,
+        oppRecordId,
         buyerRecordId: buyer.id,
         discordId: interaction.user.id,
         discordTag: interaction.user.tag,
@@ -2639,7 +2684,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!commitment) return void (await interaction.editReply("🧾 No cart found yet."));
 
       const status = await getCommitmentStatus(commitment.id);
-      if (status !== "Draft" && status !== "Editing") return void (await interaction.editReply("⚠️ This commitment can’t be submitted right now."));
+      if (status !== "Draft" && status !== "Editing") {
+        return void (await interaction.editReply("⚠️ This commitment can’t be submitted right now."));
+      }
 
       const cartText = await getCartLinesText(commitment.id);
       if (cartText.includes("No sizes selected")) return void (await interaction.editReply("⚠️ Your cart is empty."));
@@ -2669,66 +2716,105 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.editReply("⚠️ Could not submit.");
       return;
     }
+  }
 
-    if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.QUOTE}:`)) {
-      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
-        return;
-      }
-
-      const bulkRequestRecordId = interaction.customId.split(":")[1];
-
-      const modal = new ModalBuilder()
-        .setCustomId(`${SKUREQ.MODAL}:${bulkRequestRecordId}`)
-        .setTitle("Submit Supplier Quote");
-
-      const min = new TextInputBuilder()
-        .setCustomId(SKUREQ.MIN)
-        .setLabel("Min Size")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const max = new TextInputBuilder()
-        .setCustomId(SKUREQ.MAX)
-        .setLabel("Max Size")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      const price = new TextInputBuilder()
-        .setCustomId(SKUREQ.PRICE)
-        .setLabel("Unit Price")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder("e.g. 120");
-
-      const eta = new TextInputBuilder()
-        .setCustomId(SKUREQ.ETA)
-        .setLabel("ETA (Business Days)")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setPlaceholder("e.g. 5");
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(min),
-        new ActionRowBuilder().addComponents(max),
-        new ActionRowBuilder().addComponents(price),
-        new ActionRowBuilder().addComponents(eta)
-      );
-
-      await interaction.showModal(modal);
+  // Supplier Deny button
+  if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.DENY}:`)) {
+    if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.DENY}:`)) {
+    const bulkRequestRecordId = interaction.customId.split(":")[1];
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // 1) Find supplier record by Discord User ID
+    const supplierDiscordId = interaction.user.id;
+
+    const supplierMatches = await suppliersTable
+      .select({
+        maxRecords: 1,
+        filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
+      })
+      .firstPage();
+
+    const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
+
+    if (!supplierRecordId) {
+      await interaction.editReply("❌ Could not find your Supplier record (Discord User ID not linked).");
+      return;
+    }
+
+    // 2) Load the latest Bulk Request (so we can merge Denied Suppliers)
+    const br = await bulkRequestsTable.find(bulkRequestRecordId);
+    const brf = br.fields || {};
+
+    const existingDenied = Array.isArray(brf[F.BR_DENIED_SUPPLIERS]) ? brf[F.BR_DENIED_SUPPLIERS] : [];
+    const newDenied = Array.from(new Set([...existingDenied, supplierRecordId]));
+
+    // 3) Update denied suppliers + responded at (DO NOT set status to Denied yet)
+    await bulkRequestsTable.update(bulkRequestRecordId, {
+      [F.BR_DENIED_SUPPLIERS]: newDenied,
+      [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
+    });
+
+    // 4) Check if ALL suppliers denied (only suppliers with SKU Requests Channel ID)
+    const allSuppliers = await suppliersTable.select({ maxRecords: 200 }).all();
+    const contactedSupplierIds = allSuppliers
+      .filter((s) => asText(s.fields?.[F.SUP_SKU_REQUESTS_CH_ID]).trim()) // only those we can message
+      .map((s) => s.id);
+
+    const deniedAll = contactedSupplierIds.length > 0 && contactedSupplierIds.every((id) => newDenied.includes(id));
+
+    // If already has a quote, never set Denied
+    const statusNow = asText(brf[F.BR_REQUEST_STATUS]) || "";
+    const hasQuote = statusNow === "Supplier Responded";
+
+    if (deniedAll && !hasQuote) {
+      await bulkRequestsTable.update(bulkRequestRecordId, {
+        [F.BR_REQUEST_STATUS]: "Denied",
+      });
+    }
+
+    // Disable buttons on that supplier message
+    try {
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("disabled").setLabel("Denied").setStyle(ButtonStyle.Danger).setDisabled(true)
+      );
+      await interaction.message.edit({ components: [row] });
+    } catch {}
+
+    await interaction.editReply("✅ Denied saved.");
+    return;
+  }
+
+  // Supplier Quote modal submit
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SKUREQ.MODAL}:`)) {
+    try {
       if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
         await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
         return;
       }
 
       const bulkRequestRecordId = interaction.customId.split(":")[1];
+      if (!bulkRequestRecordId) {
+        await interaction.reply({ content: "❌ Missing request id.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const minSize = interaction.fields.getTextInputValue(SKUREQ.MIN).trim();
+      const maxSize = interaction.fields.getTextInputValue(SKUREQ.MAX).trim();
+      const unitPrice = parseMoneyNumber(interaction.fields.getTextInputValue(SKUREQ.PRICE));
+      const etaDays = Number.parseInt(interaction.fields.getTextInputValue(SKUREQ.ETA), 10);
+
+      if (!minSize || !maxSize || unitPrice == null || !Number.isFinite(etaDays) || etaDays <= 0) {
+        await interaction.reply({ content: "❌ Please fill all fields correctly.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-      // 1) Find supplier record by Discord User ID
+      // Find supplier record by supplier Discord user id
       const supplierDiscordId = interaction.user.id;
 
       const supplierMatches = await suppliersTable
@@ -2740,137 +2826,52 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
 
-      if (!supplierRecordId) {
-        await interaction.editReply("❌ Could not find your Supplier record (Discord User ID not linked).");
-        return;
-      }
-
-      // 2) Load the latest Bulk Request (so we can merge Denied Suppliers)
-      const br = await bulkRequestsTable.find(bulkRequestRecordId);
-      const brf = br.fields || {};
-
-      const existingDenied = Array.isArray(brf[F.BR_DENIED_SUPPLIERS]) ? brf[F.BR_DENIED_SUPPLIERS] : [];
-      const newDenied = Array.from(new Set([...existingDenied, supplierRecordId]));
-
-      // 3) Update denied suppliers + responded at (DO NOT set status to Denied yet)
-      await bulkRequestsTable.update(bulkRequestRecordId, {
-        [F.BR_DENIED_SUPPLIERS]: newDenied,
+      const patch = {
+        [F.BR_MIN_SIZE]: minSize,
+        [F.BR_MAX_SIZE]: maxSize,
+        [F.BR_UNIT_PRICE]: Number(unitPrice.toFixed(2)),
+        [F.BR_ETA_DAYS]: Math.round(etaDays),
         [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
-      });
+        [F.BR_REQUEST_STATUS]: "Supplier Responded",
+      };
 
-      // 4) Check if ALL suppliers denied (only suppliers with SKU Requests Channel ID)
-      const allSuppliers = await suppliersTable.select({ maxRecords: 200 }).all();
-      const contactedSupplierIds = allSuppliers
-        .filter((s) => asText(s.fields?.[F.SUP_SKU_REQUESTS_CH_ID]).trim()) // only those we can message
-        .map((s) => s.id);
-
-      const deniedAll = contactedSupplierIds.length > 0 && contactedSupplierIds.every((id) => newDenied.includes(id));
-
-      // If already has a quote, never set Denied
-      const statusNow = asText(brf[F.BR_REQUEST_STATUS]) || "";
-      const hasQuote = statusNow === "Supplier Responded";
-
-      if (deniedAll && !hasQuote) {
-        await bulkRequestsTable.update(bulkRequestRecordId, {
-          [F.BR_REQUEST_STATUS]: "Denied",
-        });
+      // Only set link if supplier record found
+      if (supplierRecordId) {
+        patch[F.BR_SUPPLIER_LINK] = [supplierRecordId];
+      } else {
+        console.warn("Supplier record not found for Discord user:", supplierDiscordId);
       }
 
-      // Disable buttons on that supplier message
+      await bulkRequestsTable.update(bulkRequestRecordId, patch);
+
+      // Disable buttons on the supplier message
       try {
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("disabled").setLabel("Denied").setStyle(ButtonStyle.Danger).setDisabled(true)
+          new ButtonBuilder()
+            .setCustomId("disabled")
+            .setLabel("Quote Submitted ✓")
+            .setStyle(ButtonStyle.Success)
+            .setDisabled(true)
         );
         await interaction.message.edit({ components: [row] });
       } catch {}
 
-      await interaction.editReply("✅ Denied saved.");
+      await interaction.editReply("✅ Quote submitted.");
+      return;
+    } catch (err) {
+      console.error("SKUREQ.MODAL failed:", err);
+      try {
+        // try to respond even if deferReply didn't happen
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply("❌ Something went wrong saving your quote. Please try again.");
+        } else {
+          await interaction.reply({ content: "❌ Something went wrong saving your quote. Please try again.", flags: MessageFlags.Ephemeral });
+        }
+      } catch {}
       return;
     }
-
-    if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SKUREQ.MODAL}:`)) {
-      try {
-        if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-          await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
-          return;
-        }
-
-        const bulkRequestRecordId = interaction.customId.split(":")[1];
-        if (!bulkRequestRecordId) {
-          await interaction.reply({ content: "❌ Missing request id.", flags: MessageFlags.Ephemeral });
-          return;
-        }
-
-        const minSize = interaction.fields.getTextInputValue(SKUREQ.MIN).trim();
-        const maxSize = interaction.fields.getTextInputValue(SKUREQ.MAX).trim();
-        const unitPrice = parseMoneyNumber(interaction.fields.getTextInputValue(SKUREQ.PRICE));
-        const etaDays = Number.parseInt(interaction.fields.getTextInputValue(SKUREQ.ETA), 10);
-
-        if (!minSize || !maxSize || unitPrice == null || !Number.isFinite(etaDays) || etaDays <= 0) {
-          await interaction.reply({ content: "❌ Please fill all fields correctly.", flags: MessageFlags.Ephemeral });
-          return;
-        }
-
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-        // Find supplier record by supplier Discord user id
-        const supplierDiscordId = interaction.user.id;
-
-        const supplierMatches = await suppliersTable
-          .select({
-            maxRecords: 1,
-            filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
-          })
-          .firstPage();
-
-        const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
-
-        const patch = {
-          [F.BR_MIN_SIZE]: minSize,
-          [F.BR_MAX_SIZE]: maxSize,
-          [F.BR_UNIT_PRICE]: Number(unitPrice.toFixed(2)),
-          [F.BR_ETA_DAYS]: Math.round(etaDays),
-          [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
-          [F.BR_REQUEST_STATUS]: "Supplier Responded",
-        };
-
-        // Only set link if supplier record found
-        if (supplierRecordId) {
-          patch[F.BR_SUPPLIER_LINK] = [supplierRecordId];
-        } else {
-          console.warn("Supplier record not found for Discord user:", supplierDiscordId);
-        }
-
-        await bulkRequestsTable.update(bulkRequestRecordId, patch);
-
-        // Disable buttons on the supplier message
-        try {
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId("disabled")
-              .setLabel("Quote Submitted ✓")
-              .setStyle(ButtonStyle.Success)
-              .setDisabled(true)
-          );
-          await interaction.message.edit({ components: [row] });
-        } catch {}
-
-        await interaction.editReply("✅ Quote submitted.");
-        return;
-      } catch (err) {
-        console.error("SKUREQ.MODAL failed:", err);
-        try {
-          // try to respond even if deferReply didn't happen
-          if (interaction.deferred || interaction.replied) {
-            await interaction.editReply("❌ Something went wrong saving your quote. Please try again.");
-          } else {
-            await interaction.reply({ content: "❌ Something went wrong saving your quote. Please try again.", flags: MessageFlags.Ephemeral });
-          }
-        } catch {}
-        return;
-      }
-    }
-  });
+  }
+});
 
 /* =========================
    EXPRESS API
