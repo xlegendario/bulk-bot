@@ -2024,6 +2024,47 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // Supplier SKU Request: Quote Bulk (opens modal)
+  if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.QUOTE}:`)) {
+    try {
+      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const bulkRequestRecordId = interaction.customId.split(":")[1];
+      if (!bulkRequestRecordId) {
+        await interaction.reply({ content: "❌ Missing request id.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`${SKUREQ.MODAL}:${bulkRequestRecordId}`)
+        .setTitle("Submit Supplier Quote");
+
+      const min = new TextInputBuilder().setCustomId(SKUREQ.MIN).setLabel("Min Size").setStyle(TextInputStyle.Short).setRequired(true);
+      const max = new TextInputBuilder().setCustomId(SKUREQ.MAX).setLabel("Max Size").setStyle(TextInputStyle.Short).setRequired(true);
+      const price = new TextInputBuilder().setCustomId(SKUREQ.PRICE).setLabel("Unit Price").setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("e.g. 120");
+      const eta = new TextInputBuilder().setCustomId(SKUREQ.ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder("e.g. 5");
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(min),
+        new ActionRowBuilder().addComponents(max),
+        new ActionRowBuilder().addComponents(price),
+        new ActionRowBuilder().addComponents(eta)
+      );
+
+      await interaction.showModal(modal);
+      return;
+    } catch (err) {
+      console.error("SKUREQ.QUOTE failed:", err);
+      try {
+        await interaction.reply({ content: "❌ Could not open quote form.", flags: MessageFlags.Ephemeral });
+      } catch {}
+      return;
+    }
+  }  
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SUPQ.MODAL}:`)) {
     // supq_modal:<oppId>:<size>
     const parts = interaction.customId.split(":");
@@ -3175,13 +3216,13 @@ app.post("/dispatch-bulk-request", async (req, res) => {
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId(`${SKUREQ.DENY}:${bulkRequestRecordId}`)
-          .setLabel("Deny")
-          .setStyle(ButtonStyle.Danger),
-        new ButtonBuilder()
           .setCustomId(`${SKUREQ.QUOTE}:${bulkRequestRecordId}`)
           .setLabel("Quote Bulk")
-          .setStyle(ButtonStyle.Success)
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`${SKUREQ.DENY}:${bulkRequestRecordId}`)
+          .setLabel("Deny")
+          .setStyle(ButtonStyle.Danger)
       );
 
       await ch.send({ embeds: [embed], components: [row] });
