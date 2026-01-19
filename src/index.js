@@ -262,6 +262,15 @@ function quoteFieldToMap(fieldValue) {
   return m;
 }
 
+function quoteMapToSummaryQtyFirst(map) {
+  const arr = Array.from(map.entries())
+    .map(([s, q]) => [String(s), Number(q) || 0])
+    .filter(([_, q]) => q > 0)
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  return arr.length ? arr.map(([s, q]) => `${q}x ${s}`).join(NL) : "(none)";
+}
+
 function quoteMapToLinesQtyFirst(map) {
   const arr = Array.from(map.entries())
     .map(([s, q]) => [String(s), Number(q) || 0])
@@ -1732,7 +1741,7 @@ function buildDepositButtonRow(commitmentId, enabled) {
   );
 }
 
-async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText, totalPairs, currency }) {
+async function postSupplierQuote({ guild, oppRecordId, oppFields, currency }) {
   if (!SUPPLIER_QUOTES_CHANNEL_ID) return null;
 
   const ch = await guild.channels.fetch(String(SUPPLIER_QUOTES_CHANNEL_ID)).catch(() => null);
@@ -1740,33 +1749,42 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
 
   const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
   const bulkId = toBulkId(oppId);
-
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+
+  const finalMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
+  const summaryText = quoteMapToSummaryQtyFirst(finalMap);
+  const totalPairs = Array.from(finalMap.values()).reduce((s, q) => s + (Number(q) || 0), 0);
 
   const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
-  const supplierUnitStr =
-    supplierUnit === null || Number.isNaN(supplierUnit) ? "—" : formatMoney(currency, supplierUnit);
+  const unitStr = supplierUnit === null ? "—" : formatMoney(currency, supplierUnit);
+  const totalStr = supplierUnit === null ? "—" : formatMoney(currency, supplierUnit * totalPairs);
 
-  const supplierTotal =
-    supplierUnit === null || Number.isNaN(supplierUnit) ? null : supplierUnit * totalPairs;
-  const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
+  const desc = [
+    `**${bulkId}**`,
+    "",
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+    "",
+    `**Total Pairs:** **${totalPairs}**`,
+    `**Unit Price:** **${unitStr}**`,
+    `**Total Price:** **${totalStr}**`,
+    "",
+    `**Summary:**`,
+    summaryText,
+  ].join(NL);
 
   const embed = new EmbedBuilder()
-    .setTitle("📦 SUPPLIER QUOTE (BUY)")
-    .setDescription(`**${bulkId}** — ${product}`)
-    .setColor(0xffd300)
-    .addFields(
-      { name: "Confirmed Pairs", value: `**${totalPairs}**`, inline: true },
-      { name: "Supplier Unit Price", value: supplierUnitStr, inline: true },
-      { name: "Supplier Total", value: supplierTotalStr, inline: true },
-      { name: "Size Breakdown", value: sizeTotalsText || "(none)", inline: false }
-    );
+    .setTitle(`📦 SUPPLIER QUOTE (BUY) — ${bulkId}`)
+    .setDescription(desc)
+    .setColor(0xffd300);
 
+  // Edit existing if stored
   const existingMsgId = asText(oppFields[F.OPP_QUOTES_MESSAGE_ID]);
   if (existingMsgId) {
     try {
       const m = await ch.messages.fetch(existingMsgId);
-      await m.edit({ content: "", embeds: [embed] });
+      await m.edit({ embeds: [embed], content: "" });
       return m.id;
     } catch {}
   }
@@ -1777,7 +1795,7 @@ async function postSupplierQuote({ guild, oppRecordId, oppFields, sizeTotalsText
 }
 
 
-async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalPairs, sizeTotalsText, currency }) {
+async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, currency }) {
   if (!CONFIRMED_BULKS_CHANNEL_ID) return;
 
   const ch = await guild.channels.fetch(String(CONFIRMED_BULKS_CHANNEL_ID)).catch(() => null);
@@ -1785,32 +1803,44 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, totalP
 
   const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
   const bulkId = toBulkId(oppId);
-
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
 
-  const sellUnit = formatMoney(currency, oppFields[F.OPP_FINAL_SELL_PRICE]);
+  const finalMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
+  const summaryText = quoteMapToSummaryQtyFirst(finalMap);
+  const totalPairs = Array.from(finalMap.values()).reduce((s, q) => s + (Number(q) || 0), 0);
+
+  const sellUnit = parseMoneyNumber(oppFields[F.OPP_FINAL_SELL_PRICE]);
+  const unitStr = sellUnit === null ? "—" : formatMoney(currency, sellUnit);
+  const totalStr = sellUnit === null ? "—" : formatMoney(currency, sellUnit * totalPairs);
+
   const discount = formatPercent(oppFields[F.OPP_FINAL_DISCOUNT_PCT]);
 
-  const sellUnitRaw = Number(asText(oppFields[F.OPP_FINAL_SELL_PRICE]));
-  const totalSell = Number.isFinite(sellUnitRaw) ? sellUnitRaw * totalPairs : null;
-  const totalSellStr = totalSell === null ? "—" : formatMoney(currency, totalSell);
+  const desc = [
+    `**${bulkId}**`,
+    "",
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+    "",
+    `**Total Pairs:** **${totalPairs}**`,
+    `**Unit Price:** **${unitStr}**`,
+    `**Total Price:** **${totalStr}**`,
+    `**Final Discount:** **${discount}**`,
+    "",
+    `**Summary:**`,
+    summaryText,
+  ].join(NL);
 
   const embed = new EmbedBuilder()
-    .setTitle("✅ CONFIRMED BULK (SELL)")
-    .setDescription(`**${bulkId}** — ${product}`)
-    .setColor(0xffd300)
-    .addFields(
-      { name: "Final Total Pairs", value: `**${totalPairs}**`, inline: true },
-      { name: "Final Sell Price", value: sellUnit, inline: true },
-      { name: "Total Sell", value: totalSellStr, inline: true },
-      { name: "Final Discount", value: discount, inline: true },
-      { name: "Sizes", value: sizeTotalsText || "(none)", inline: false }
-    );
+    .setTitle(`✅ CONFIRMED BULK (SELL) — ${bulkId}`)
+    .setDescription(desc)
+    .setColor(0xffd300);
 
   await ch.send({ embeds: [embed] });
 }
 
-async function postSupplierConfirmedQuoteToSupplierServer({ oppRecordId, oppFields, sizeTotalsText, totalPairs, currency }) {
+
+async function postSupplierConfirmedQuoteToSupplierServer({ oppRecordId, oppFields, currency }) {
   if (!SUPPLIER_GUILD_ID) return;
 
   const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID)).catch(() => null);
@@ -1825,29 +1855,72 @@ async function postSupplierConfirmedQuoteToSupplierServer({ oppRecordId, oppFiel
   const oppId = asText(oppFields["Opportunity ID"]) || oppRecordId;
   const bulkId = toBulkId(oppId);
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+
+  const finalMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
+  const summaryText = quoteMapToSummaryQtyFirst(finalMap);
+  const totalPairs = Array.from(finalMap.values()).reduce((s, q) => s + (Number(q) || 0), 0);
 
   const supplierUnit = parseMoneyNumber(oppFields[F.OPP_SUPPLIER_UNIT_PRICE]);
-  const supplierUnitStr =
-    supplierUnit === null || Number.isNaN(supplierUnit) ? "—" : formatMoney(currency, supplierUnit);
+  const unitStr = supplierUnit === null ? "—" : formatMoney(currency, supplierUnit);
+  const totalStr = supplierUnit === null ? "—" : formatMoney(currency, supplierUnit * totalPairs);
 
-  const supplierTotal =
-    supplierUnit === null || Number.isNaN(supplierUnit) ? null : supplierUnit * totalPairs;
-  const supplierTotalStr = supplierTotal === null ? "—" : formatMoney(currency, supplierTotal);
+  const desc = [
+    `**${bulkId}**`,
+    "",
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+    "",
+    `**Total Pairs:** **${totalPairs}**`,
+    `**Unit Price:** **${unitStr}**`,
+    `**Total Price:** **${totalStr}**`,
+    "",
+    `**Summary:**`,
+    summaryText,
+  ].join(NL);
 
   const embed = new EmbedBuilder()
-    .setTitle("✅ CONFIRMED QUOTE (SUPPLIER)")
-    .setDescription(`**${bulkId}** — ${product}`)
-    .setColor(0xffd300)
-    .addFields(
-      { name: "Total Pairs", value: `**${totalPairs}**`, inline: true },
-      { name: "Supplier Unit Price", value: supplierUnitStr, inline: true },
-      { name: "Supplier Total", value: supplierTotalStr, inline: true },
-      { name: "Sizes", value: sizeTotalsText || "(none)", inline: false }
-    );
+    .setTitle(`✅ CONFIRMED QUOTE — ${bulkId}`)
+    .setDescription(desc)
+    .setColor(0xffd300);
 
   await ch.send({ embeds: [embed] });
 }
 
+function buildBulkHistoryEmbed({ oppFields, currency }) {
+  const oppId = asText(oppFields["Opportunity ID"]);
+  const bulkId = toBulkId(oppId || "");
+
+  const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk Opportunity";
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+
+  const finalMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
+  const totalPairs = Array.from(finalMap.values())
+    .reduce((s, q) => s + (Number(q) || 0), 0);
+
+  const sellUnit = parseMoneyNumber(oppFields[F.OPP_FINAL_SELL_PRICE]);
+  const unitStr = sellUnit == null ? "—" : formatMoney(currency, sellUnit);
+  const totalStr = sellUnit == null ? "—" : formatMoney(currency, sellUnit * totalPairs);
+
+  const discount = formatPercent(oppFields[F.OPP_FINAL_DISCOUNT_PCT]);
+
+  const desc = [
+    `**${bulkId}**`,
+    "",
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+    "",
+    `**Total Pairs:** **${totalPairs}**`,
+    `**Unit Price:** **${unitStr}**`,
+    `**Total Price:** **${totalStr}**`,
+    `**Final Discount:** **${discount}**`,
+  ].join(NL);
+
+  return new EmbedBuilder()
+    .setTitle(`✅ CONFIRMED BULK — ${bulkId}`)
+    .setDescription(desc)
+    .setColor(0xffd300);
+}
 
 
 /* =========================
@@ -2970,31 +3043,10 @@ app.post("/finalize-opportunity", async (req, res) => {
     oppFields = opp.fields || {};
 
     // ---- Post supplier quote (BUY) + confirmed bulks summary (SELL) ----
-    await postSupplierQuote({
-      guild,
-      oppRecordId: opportunityRecordId,
-      oppFields,
-      sizeTotalsText,
-      totalPairs,
-      currency,
-    });
+    await postSupplierQuote({ guild, oppRecordId: opportunityRecordId, oppFields, currency });
+    await postConfirmedBulksSummary({ guild, oppRecordId: opportunityRecordId, oppFields, currency });
+    await postSupplierConfirmedQuoteToSupplierServer({ oppRecordId: opportunityRecordId, oppFields, currency });
 
-    await postConfirmedBulksSummary({
-      guild,
-      oppRecordId: opportunityRecordId,
-      oppFields,
-      totalPairs,
-      sizeTotalsText,
-      currency,
-    });
-
-    await postSupplierConfirmedQuoteToSupplierServer({
-      oppRecordId: opportunityRecordId,
-      oppFields,
-      sizeTotalsText,
-      totalPairs,
-      currency,
-    });
 
     // ---- Create/Update Confirmed Bulks record (LINKS only) ----
     const eligibleRecords = commitments.filter((c) => eligibleCommitmentIds.includes(c.id));
@@ -3095,7 +3147,7 @@ app.post("/finalize-opportunity", async (req, res) => {
       try {
         const closedCh = await client.channels.fetch(String(CLOSED_BULKS_CHANNEL_ID)).catch(() => null);
         if (closedCh?.isTextBased()) {
-          const embed = buildClosedBulkEmbed({ oppFields, totalPairs, currency });
+          const embed = buildBulkHistoryEmbed({ oppFields, currency });
           await closedCh.send({ embeds: [embed] });
         }
       } catch (e) {
