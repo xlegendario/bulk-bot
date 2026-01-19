@@ -202,7 +202,6 @@ const F = {
   BR_SKU: "SKU",
   BR_QTY: "Quantity",
   BR_BUYER_TARGET_PRICE: "Buyer Target Price",
-  BR_REQUEST_STATUS: "Request Status",
   BR_AMOUNT_OF_REQUESTS: "Amount of Requests",
   BR_MIN_SIZE: "Min Size",
   BR_MAX_SIZE: "Max Size",
@@ -2871,7 +2870,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
     }
-});
+  });
 
 /* =========================
    EXPRESS API
