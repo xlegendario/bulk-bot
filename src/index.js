@@ -211,6 +211,7 @@ const F = {
   BR_SUPPLIER_RESPONDED_AT: "Supplier Responded At",
   BR_SUPPLIER_LINK: "Supplier",
   BR_REQUEST_STATUS: "Request Status",
+  BR_DENIED_SUPPLIERS: "Denied Suppliers",
 };
 
 /* =========================
@@ -2685,15 +2686,57 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const bulkRequestRecordId = interaction.customId.split(":")[1];
-
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+      // 1) Find supplier record by Discord User ID
+      const supplierDiscordId = interaction.user.id;
+
+      const supplierMatches = await suppliersTable
+        .select({
+          maxRecords: 1,
+          filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
+        })
+        .firstPage();
+
+      const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
+
+      if (!supplierRecordId) {
+        await interaction.editReply("❌ Could not find your Supplier record (Discord User ID not linked).");
+        return;
+      }
+
+      // 2) Load the latest Bulk Request (so we can merge Denied Suppliers)
+      const br = await bulkRequestsTable.find(bulkRequestRecordId);
+      const brf = br.fields || {};
+
+      const existingDenied = Array.isArray(brf[F.BR_DENIED_SUPPLIERS]) ? brf[F.BR_DENIED_SUPPLIERS] : [];
+      const newDenied = Array.from(new Set([...existingDenied, supplierRecordId]));
+
+      // 3) Update denied suppliers + responded at (DO NOT set status to Denied yet)
       await bulkRequestsTable.update(bulkRequestRecordId, {
-        [F.BR_REQUEST_STATUS]: "Denied",
+        [F.BR_DENIED_SUPPLIERS]: newDenied,
         [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
       });
 
-      // Disable the buttons on that message
+      // 4) Check if ALL suppliers denied (only suppliers with SKU Requests Channel ID)
+      const allSuppliers = await suppliersTable.select({ maxRecords: 200 }).all();
+      const contactedSupplierIds = allSuppliers
+        .filter((s) => asText(s.fields?.[F.SUP_SKU_REQUESTS_CH_ID]).trim()) // only those we can message
+        .map((s) => s.id);
+
+      const deniedAll = contactedSupplierIds.length > 0 && contactedSupplierIds.every((id) => newDenied.includes(id));
+
+      // If already has a quote, never set Denied
+      const statusNow = asText(brf[F.BR_REQUEST_STATUS]) || "";
+      const hasQuote = statusNow === "Supplier Responded";
+
+      if (deniedAll && !hasQuote) {
+        await bulkRequestsTable.update(bulkRequestRecordId, {
+          [F.BR_REQUEST_STATUS]: "Denied",
+        });
+      }
+
+      // Disable buttons on that supplier message
       try {
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("disabled").setLabel("Denied").setStyle(ButtonStyle.Danger).setDisabled(true)
