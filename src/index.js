@@ -1666,8 +1666,11 @@ async function ensureDealChannel({ guild, categoryId, buyerDiscordId, buyerTag, 
 function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice, totalAmount, depositPct, note }) {
   const product = asText(oppFields[F.OPP_PRODUCT_NAME]) || "Bulk";
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
-  const etaLine = formatEtaBusinessDays(oppFields[F.OPP_ETA_BUSINESS_DAYS]);
-  
+
+  const oppId = asText(oppFields["Opportunity ID"]);
+  const bulkId = toBulkId(oppId || "");
+
+  const etaLine = formatEtaBusinessDays(oppFields[F.OPP_ETA_BUSINESS_DAYS]); // already includes "ETA:"
   const finalizedAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
   const finalizedCountdown = fmtDiscordRelative(finalizedAtUnix);
 
@@ -1678,20 +1681,42 @@ function buildDepositEmbed({ oppFields, commitmentLinesText, currency, unitPrice
   const depAmount = totalAmount * (depositPct / 100);
   const depStr = `${sym}${depAmount % 1 === 0 ? depAmount.toFixed(0) : depAmount.toFixed(2)}`;
 
-  const desc =
-    (note || "") +
-    `**${product}**${NL}` +
-    `**SKU:** \`${sku}\`${NL}${NL}` +
-    (etaLine ? `**ETA:** ${etaLine}${NL}${NL}` : `${NL}`) +
-    `**Your commitment:**${NL}${commitmentLinesText}${NL}${NL}` +
-    `**Unit price:** ${unitStr}${NL}` +
-    `**Total:** ${totalStr}${NL}${NL}` +
-    (depositPct <= 0
-      ? `✅ **No deposit required for you.**${NL}`
-      : `💳 **Deposit required (${depositPct}%):** **${depStr}**${NL}`) +
-    `${NL}⏳ **Deposit Closes:** **${finalizedCountdown}**${NL}`;
+  // Title: BULK-2026-0013 Confirmation
+  const title = `${bulkId || "BULK"} Confirmation`;
 
-  return new EmbedBuilder().setTitle("📌 Bulk Payment / Confirmation").setDescription(desc).setColor(0xffd300);
+  const SP = "\u200B";
+
+  const desc = [
+    `**${product}**`,
+    `**SKU:** \`${sku}\``,
+
+    note ? SP : null,
+    note ? `⚠️ ${note.replace(/^⚠️\s*/g, "")}` : null, // prevents double ⚠️
+
+    SP,
+    `**Final Summary:**`,
+    commitmentLinesText,
+
+    SP,
+    `**Unit price:** ${unitStr}`,
+    `**Total:** ${totalStr}`,
+
+    etaLine ? SP : null,
+    etaLine ? `**${etaLine}**` : null,
+
+    SP,
+    depositPct <= 0
+      ? `✅ **No deposit required.**`
+      : `💳 **Deposit required (${depositPct}%):** **${depStr}**`,
+
+    SP,
+    `⏳ **Deposit Closes:** **${finalizedCountdown}**`,
+  ].filter(Boolean).join(NL);
+
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(desc)
+    .setColor(0xffd300);
 }
 
 function buildDepositButtonRow(commitmentId, enabled) {
