@@ -195,6 +195,8 @@ const F = {
   // Suppliers table
   SUP_REQUESTED_QUOTES_CH_ID: "Requested Quotes Channel ID",
   SUP_CONFIRMED_QUOTES_CH_ID: "Confirmed Quotes Channel ID",
+  SUP_SKU_REQUESTS_CH_ID: "SKU Requests Channel ID",
+  SUP_DISCORD_USER_ID: "Discord User ID", // if your Suppliers table uses a different name, change only this line,
 
   // Bulk Requests
   BR_SKU: "SKU",
@@ -202,6 +204,13 @@ const F = {
   BR_BUYER_TARGET_PRICE: "Buyer Target Price",
   BR_REQUEST_STATUS: "Request Status",
   BR_AMOUNT_OF_REQUESTS: "Amount of Requests",
+  BR_MIN_SIZE: "Min Size",
+  BR_MAX_SIZE: "Max Size",
+  BR_UNIT_PRICE: "Unit Price",
+  BR_ETA_DAYS: "ETA (Business Days)",
+  BR_SUPPLIER_RESPONDED_AT: "Supplier Responded At",
+  BR_SUPPLIER_LINK: "Supplier",
+  BR_REQUEST_STATUS: "Request Status",
 };
 
 /* =========================
@@ -483,6 +492,17 @@ const SUPQ = {
   SIZE: "supq_size",        // supq_size:<oppId>:<size>
   MODAL: "supq_modal",      // supq_modal:<oppId>:<size>
   QTY: "qty",
+};
+
+const SKUREQ = {
+  DENY: "skureq_deny",      // skureq_deny:<bulkReqId>
+  QUOTE: "skureq_quote",    // skureq_quote:<bulkReqId>
+  MODAL: "skureq_modal",    // skureq_modal:<bulkReqId>
+
+  MIN: "min",
+  MAX: "max",
+  PRICE: "price",
+  ETA: "eta",
 };
 
 const FULLRUN = {
@@ -2608,6 +2628,140 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.editReply("⚠️ Could not submit.");
       return;
     }
+
+    if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.QUOTE}:`)) {
+      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const bulkRequestRecordId = interaction.customId.split(":")[1];
+
+      const modal = new ModalBuilder()
+        .setCustomId(`${SKUREQ.MODAL}:${bulkRequestRecordId}`)
+        .setTitle("Submit Supplier Quote");
+
+      const min = new TextInputBuilder()
+        .setCustomId(SKUREQ.MIN)
+        .setLabel("Min Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const max = new TextInputBuilder()
+        .setCustomId(SKUREQ.MAX)
+        .setLabel("Max Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const price = new TextInputBuilder()
+        .setCustomId(SKUREQ.PRICE)
+        .setLabel("Unit Price")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 120");
+
+      const eta = new TextInputBuilder()
+        .setCustomId(SKUREQ.ETA)
+        .setLabel("ETA (Business Days)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 5");
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(min),
+        new ActionRowBuilder().addComponents(max),
+        new ActionRowBuilder().addComponents(price),
+        new ActionRowBuilder().addComponents(eta)
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.DENY}:`)) {
+      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const bulkRequestRecordId = interaction.customId.split(":")[1];
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      await bulkRequestsTable.update(bulkRequestRecordId, {
+        [F.BR_REQUEST_STATUS]: "Denied",
+        [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
+      });
+
+      // Disable the buttons on that message
+      try {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("disabled").setLabel("Denied").setStyle(ButtonStyle.Danger).setDisabled(true)
+        );
+        await interaction.message.edit({ components: [row] });
+      } catch {}
+
+      await interaction.editReply("✅ Denied saved.");
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(`${SKUREQ.MODAL}:`)) {
+      if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
+        await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const bulkRequestRecordId = interaction.customId.split(":")[1];
+
+      const minSize = interaction.fields.getTextInputValue(SKUREQ.MIN).trim();
+      const maxSize = interaction.fields.getTextInputValue(SKUREQ.MAX).trim();
+      const unitPrice = parseMoneyNumber(interaction.fields.getTextInputValue(SKUREQ.PRICE));
+      const etaDays = Number.parseInt(interaction.fields.getTextInputValue(SKUREQ.ETA), 10);
+
+      if (!minSize || !maxSize || unitPrice == null || !Number.isFinite(etaDays) || etaDays <= 0) {
+        await interaction.reply({ content: "❌ Please fill all fields correctly.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      // Find supplier record by supplier Discord user id
+      const supplierDiscordId = interaction.user.id;
+      const supplierMatches = await suppliersTable
+        .select({
+          maxRecords: 1,
+          filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(supplierDiscordId)}'`,
+        })
+        .firstPage();
+
+      const supplierRecordId = supplierMatches.length ? supplierMatches[0].id : null;
+
+      const patch = {
+        [F.BR_MIN_SIZE]: minSize,
+        [F.BR_MAX_SIZE]: maxSize,
+        [F.BR_UNIT_PRICE]: Number(unitPrice.toFixed(2)),
+        [F.BR_ETA_DAYS]: Math.round(etaDays),
+        [F.BR_SUPPLIER_RESPONDED_AT]: new Date().toISOString(),
+        [F.BR_REQUEST_STATUS]: "Supplier Responded",
+      };
+
+      if (supplierRecordId) {
+        patch[F.BR_SUPPLIER_LINK] = [supplierRecordId];
+      }
+
+      await bulkRequestsTable.update(bulkRequestRecordId, patch);
+
+      // Disable buttons on the supplier message
+      try {
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("disabled").setLabel("Quote Submitted ✓").setStyle(ButtonStyle.Success).setDisabled(true)
+        );
+        await interaction.message.edit({ components: [row] });
+      } catch {}
+
+      await interaction.editReply("✅ Quote submitted.");
+      return;
+    }
   }
 });
 
@@ -2922,6 +3076,82 @@ app.post("/close-opportunity", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
+// ---- Send Bulk Request To Suppliers ----
+app.post("/dispatch-bulk-request", async (req, res) => {
+  try {
+    if (!assertSecret(req, res)) return;
+
+    const { bulkRequestRecordId } = req.body || {};
+    if (!bulkRequestRecordId) {
+      return res.status(400).json({ ok: false, error: "bulkRequestRecordId is required" });
+    }
+
+    if (!SUPPLIER_GUILD_ID) {
+      return res.status(500).json({ ok: false, error: "SUPPLIER_GUILD_ID missing in env" });
+    }
+
+    // Load the Bulk Request record
+    const br = await bulkRequestsTable.find(bulkRequestRecordId);
+    const f = br.fields || {};
+
+    const sku = asText(f[F.BR_SKU]).trim();
+    const qty = Number(f[F.BR_QTY] || 0) || 0;
+    const target = asText(f[F.BR_BUYER_TARGET_PRICE]).trim();
+
+    if (!sku || qty <= 0) {
+      return res.status(400).json({ ok: false, error: "Bulk Request missing SKU or Quantity" });
+    }
+
+    const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
+
+    // Fetch all suppliers
+    const suppliers = await suppliersTable.select({ maxRecords: 200 }).all();
+
+    let sent = 0;
+
+    for (const sup of suppliers) {
+      const sf = sup.fields || {};
+      const chId = asText(sf[F.SUP_SKU_REQUESTS_CH_ID]).trim();
+      if (!chId) continue;
+
+      const ch = await supplierGuild.channels.fetch(String(chId)).catch(() => null);
+      if (!ch || !ch.isTextBased()) continue;
+
+      const embed = new EmbedBuilder()
+        .setTitle("📩 SKU REQUEST")
+        .setColor(0xffd300)
+        .setDescription(
+          [
+            `**SKU:** \`${sku}\``,
+            `**Quantity:** **${qty}**`,
+            target ? `**Buyer Target:** **${target}**` : null,
+          ].filter(Boolean).join(NL)
+        )
+        .setFooter({ text: "Reply with Quote Bulk or Deny" });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${SKUREQ.DENY}:${bulkRequestRecordId}`)
+          .setLabel("Deny")
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(`${SKUREQ.QUOTE}:${bulkRequestRecordId}`)
+          .setLabel("Quote Bulk")
+          .setStyle(ButtonStyle.Success)
+      );
+
+      await ch.send({ embeds: [embed], components: [row] });
+      sent++;
+    }
+
+    return res.json({ ok: true, sent });
+  } catch (err) {
+    console.error("dispatch-bulk-request error:", err);
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
 
 
 /* =========================
