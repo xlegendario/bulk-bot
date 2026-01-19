@@ -1554,7 +1554,14 @@ async function startDepositsFromAllocated(opportunityRecordId) {
     const components = depositPct > 0 ? [buildDepositButtonRow(c.id, true)] : [];
 
     // send or edit deposit message (optional: you can store message id later)
-    await dealChannel.send({ embeds: [embed], components });
+    const sent = await dealChannel.send({ embeds: [embed], components });
+
+    // Store / update deal message id so finalize can edit it later
+    try {
+      await commitmentsTable.update(c.id, { [F.COM_DEAL_MESSAGE_ID]: String(sent.id) });
+    } catch (e) {
+      console.warn("Could not store deal message id:", c.id, e?.message || e);
+    }
   }
 
   return { channelsCreated, cancelled };
