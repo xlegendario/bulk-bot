@@ -873,29 +873,14 @@ function splitTextToEmbedFields(text, maxLen = 1000) {
 async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
   const embed = buildOpportunityEmbed(fields);
 
-  const startPrice = Number(asText(fields[F.OPP_START_SELL_PRICE]));
-  const currentTotalPairs = Number(asText(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0));
-  const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
-
-  if (!Number.isFinite(startPrice)) return embed;
-
-  const tiers = await fetchTiersForOpportunity(oppRecordId);
-  if (!tiers.length) return embed;
-
-  const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
-  if (!ladder) return embed;
-
-  // ✅ extra polish spacer BEFORE the ladder
-  embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
-
   // =========================
   // STOCK-LIMITED: show Remaining Quantity per size (live)
+  // (IMPORTANT: must run even if tiers are missing)
   // =========================
   const remainingRaw = asText(fields?.[F.OPP_REMAINING_QTY_JSON]).trim();
   if (remainingRaw) {
     const remainingMap = quoteFieldToMap(remainingRaw);
 
-    // only sizes with qty > 0
     const filtered = new Map();
     for (const [s, q] of remainingMap.entries()) {
       const n = Number(q) || 0;
@@ -924,8 +909,27 @@ async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
       });
     }
   }
+
+  // =========================
+  // Discount ladder (optional)
+  // =========================
+  const startPrice = Number(asText(fields[F.OPP_START_SELL_PRICE]));
+  const currentTotalPairs = Number(asText(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0));
+  const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
+
+  if (Number.isFinite(startPrice)) {
+    const tiers = await fetchTiersForOpportunity(oppRecordId).catch(() => []);
+    if (Array.isArray(tiers) && tiers.length) {
+      const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
+      if (ladder) {
+        embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
+      }
+    }
+  }
+
   return embed;
 }
+
 
 function buildOrFormula(fieldName, values) {
   const parts = values.map((v) => `{${fieldName}} = '${escapeForFormula(v)}'`);
