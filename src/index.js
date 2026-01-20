@@ -2259,7 +2259,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     const [, mode, presetId] = interaction.customId.split(":");
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     const preset = await getPresetById(presetId).catch(() => null);
     if (!preset || !preset.ladder.length) {
@@ -2287,11 +2286,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(eta)
       );
 
-      await interaction.editReply({ content: `✅ Brand selected: **${preset.label}**`, embeds: [], components: [] });
       await interaction.showModal(modal);
       return;
     }
-
+    // SPECIFIC mode only:
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
       await interaction.editReply("❌ This must be used inside a text channel.");
