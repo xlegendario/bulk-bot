@@ -278,6 +278,19 @@ function quoteFieldToMap(fieldValue) {
   return m;
 }
 
+async function safeDefer(interaction, options) {
+  try {
+    if (interaction.deferred || interaction.replied) return false;
+    await interaction.deferReply(options);
+    return true;
+  } catch (err) {
+    const code = err?.code ?? err?.rawError?.code;
+    if (code === 10062 || code === 40060 || code === "InteractionAlreadyReplied") return false;
+    throw err;
+  }
+}
+
+
 function quoteMapToSummaryQtyFirst(map) {
   const arr = Array.from(map.entries())
     .map(([s, q]) => [String(s), Number(q) || 0])
@@ -2474,8 +2487,36 @@ async function safeDeferReply(interaction, options) {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
-  const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-  if (!ok) return;
+
+  // ✅ DO NOT auto-defer everything.
+  // Some buttons must use showModal() or deferUpdate(), and auto-defer would break them.
+  const cid = interaction.isButton() ? String(interaction.customId || "") : "";
+
+  const skipAutoDefer =
+    interaction.isButton() &&
+    (
+      // Supplier draft quote editor uses deferUpdate()
+      cid.startsWith(`${SUPQ.EDIT}:`) ||
+      cid.startsWith(`${SUPQ.SIZE}:`) ||
+      cid.startsWith(`${SUPQ.CONFIRM}:`) ||
+
+      // Anything that opens a modal must NOT be pre-deferred
+      cid === INITQ.BTN_BASIC ||
+      cid === INITQ.BTN_SPECIFIC ||
+      cid.startsWith(`${INITQ.BRAND}:`) ||
+      cid.startsWith(`${INITQ.STOCK_SIZE}:`) ||
+      cid.startsWith(`${INITQ.STOCK_CONFIRM}:`) ||
+      cid.startsWith(`${SKUREQ.QUOTE}:`) ||
+      cid === REQ.BTN_OPEN ||
+      cid.startsWith(`${FULLRUN.BTN}:`) ||
+      cid.startsWith("size_pick:")
+    );
+
+  if (!skipAutoDefer) {
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!ok) return;
+  }
+
 
   // =========================
   // SUPPLIER QUOTE: Edit / Confirm
