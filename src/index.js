@@ -2519,8 +2519,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       );
 
     if (!skipAutoDefer) {
-      const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-      if (!ok) return;
+      const okAuto = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+      if (!okAuto) return;
     }
   }
 
