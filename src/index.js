@@ -706,6 +706,59 @@ function sliceLadderByMinMax(ladder, minRaw, maxRaw) {
   return ladder.slice(start, end + 1);
 }
 
+function sizeToNumberForCompare(s) {
+  const raw = String(s || "").trim();
+  if (!raw) return null;
+
+  // Handles: "41", "41.5", "41,5", "41 1/3", "38 2/3"
+  const m = raw.match(/^(\d+(?:[.,]\d+)?)(?:\s+(1\/3|2\/3))?$/);
+  if (!m) return null;
+
+  const base = Number(String(m[1]).replace(",", "."));
+  if (!Number.isFinite(base)) return null;
+
+  const frac = m[2];
+  if (frac === "1/3") return base + 1 / 3;
+  if (frac === "2/3") return base + 2 / 3;
+  return base;
+}
+
+function normalizeSizeToLadder(ladder, rawSize) {
+  const raw = String(rawSize || "").trim();
+  if (!raw) return { ok: false };
+
+  // Exact match = perfect
+  if (ladder.includes(raw)) return { ok: true, value: raw };
+
+  const rawNum = sizeToNumberForCompare(raw);
+  if (rawNum === null) return { ok: false };
+
+  // Compute numeric ladder
+  const ladderNums = ladder
+    .map((s) => ({ s, n: sizeToNumberForCompare(s) }))
+    .filter((x) => x.n !== null);
+
+  if (!ladderNums.length) return { ok: false };
+
+  // Find closest
+  let best = ladderNums[0];
+  let bestDist = Math.abs(ladderNums[0].n - rawNum);
+
+  for (const x of ladderNums) {
+    const d = Math.abs(x.n - rawNum);
+    if (d < bestDist) {
+      best = x;
+      bestDist = d;
+    }
+  }
+
+  // Too far away => reject (prevents weird inputs mapping wrongly)
+  if (bestDist > 0.34) return { ok: false };
+
+  return { ok: true, value: best.s };
+}
+
+
 // --------------------------
 // Initiate Quote sessions (Specific flow)
 // key: stockSetupMessageId
@@ -2491,7 +2544,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const created = await oppsTable.create({
       [F.OPP_STATUS]: "Draft",
-      [F.OPP_SKU]: sku,
+      [F.OPP_SKU_SOFT]: sku,
       [F.OPP_MIN_SIZE]: minSize,
       [F.OPP_MAX_SIZE]: maxSize,
       [F.OPP_SUPPLIER_UNIT_PRICE]: priceNum,
@@ -2531,20 +2584,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (!sku) return void (await interaction.editReply("❌ SKU required."));
     if (!min || !max) return void (await interaction.editReply("❌ Min and Max size required."));
-    if (!preset.ladder.includes(min) || !preset.ladder.includes(max)) {
-      await interaction.editReply(`❌ Size not valid for **${preset.label}**. Use exact ladder sizes (e.g. Adidas uses 38 2/3, not 38.5).`);
-      return;
-    }
-    if (priceNum === null || !Number.isFinite(priceNum) || priceNum <= 0) {
-      await interaction.editReply("❌ Supplier Price must be a valid positive number.");
-      return;
-    }
-    if (!Number.isFinite(etaNum) || etaNum <= 0) {
-      await interaction.editReply("❌ ETA must be a positive number of business days.");
+    const minNorm = normalizeSizeToLadder(preset.ladder, min);
+    const maxNorm = normalizeSizeToLadder(preset.ladder, max);
+
+    if (!minNorm.ok || !maxNorm.ok) {
+      const examples = preset.ladder.slice(0, 10).join(", ");
+      await interaction.editReply(
+        `❌ Size not valid for **${preset.label}**.\n` +
+        `Use exact ladder sizes for that brand.\n\n` +
+        `Examples: ${examples}`
+      );
       return;
     }
 
-    const sliced = sliceLadderByMinMax(preset.ladder, min, max);
+    const minFixed = minNorm.value;
+    const maxFixed = maxNorm.value;
+
+    const sliced = sliceLadderByMinMax(preset.ladder, minFixed, maxFixed);
     if (!sliced.length) {
       await interaction.editReply("❌ Could not derive allowed sizes from Min/Max.");
       return;
@@ -2566,9 +2622,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const created = await oppsTable.create({
       [F.OPP_STATUS]: "Draft",
-      [F.OPP_SKU]: sku,
-      [F.OPP_MIN_SIZE]: min,
-      [F.OPP_MAX_SIZE]: max,
+      [F.OPP_SKU_SOFT]: sku,
+      [F.OPP_MIN_SIZE]: minFixed,
+      [F.OPP_MAX_SIZE]: maxFixed,
       [F.OPP_SUPPLIER_UNIT_PRICE]: priceNum,
       [F.OPP_ETA_BUSINESS_DAYS]: etaNum,
       [F.OPP_SUPPLIER_LINK]: [supplierRecordId],
