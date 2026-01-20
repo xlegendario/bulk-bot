@@ -2302,6 +2302,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const rows = buildBrandRows(mode, presets);
 
     await interaction.editReply({ embeds: [embed], components: rows });
+    scheduleDeleteInteractionReply(interaction, 15000);
     return;
   }
 
@@ -2342,11 +2343,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.showModal(modal);
       return;
     }
-    // SPECIFIC mode only:
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // If SPECIFIC, disable the brand buttons on the picker message immediately
+    if (mode === "specific" && interaction.message) {
+      try {
+        const disabled = interaction.message.components.map((row) => {
+          const r = ActionRowBuilder.from(row);
+          r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
+          return r;
+        });
+        await interaction.update({ components: disabled }); // ACKS interaction
+      } catch {
+        // If update fails for any reason, at least ACK the interaction so it doesn't error
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    } else {
+      // No message to update, just ACK so we can send followUps
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+
+    // From here on, ONLY use followUp/editReply depending on what we used above.
+    // To keep it simple: use followUp for everything in SPECIFIC.
+    await interaction.followUp({ content: "✅ Brand selected. Creating stock setup…", flags: MessageFlags.Ephemeral });
+
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
-      await interaction.editReply("❌ This must be used inside a text channel.");
+      await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -2374,10 +2396,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       createdBy: interaction.user.id,
     });
 
-    await interaction.editReply(`✅ Stock setup created in this channel. Fill quantities and click **Confirm Stock**.`);
+    await interaction.followUp({
+      content: `✅ Stock setup created in this channel. Fill quantities and click **Confirm Stock**.`,
+      flags: MessageFlags.Ephemeral,
+    });
+
     return;
   }
-
+  
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQ.STOCK_SIZE}:`)) {
     const [, stockMsgId, encodedSize] = interaction.customId.split(":");
     const size = sizeKeyDecode(encodedSize);
@@ -2562,7 +2588,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // cleanup session
     initiateQuoteSessions.delete(stockMsgId);
 
-    await interaction.editReply(`✅ Draft Opportunity created: **${created.id}** (admin can now fill tiers + post).`);
+    await interaction.editReply(`✅ Draft Opportunity created: ${created.id} (admin can now fill tiers + post).`);
+    scheduleDeleteInteractionReply(interaction, 5000);
     return;
   }
 
@@ -2632,6 +2659,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
 
     await interaction.editReply(`✅ Draft Opportunity created: **${created.id}** (admin can now fill tiers + post).`);
+    scheduleDeleteInteractionReply(interaction, 5000);
     return;
   }
 
