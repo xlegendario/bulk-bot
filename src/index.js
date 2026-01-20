@@ -3951,6 +3951,88 @@ app.post("/sync-opportunity-dms", async (req, res) => {
   }
 });
 
+async function postSupplierDraftQuoteToSupplierServer({ oppRecordId, oppFields, currency }) {
+  // Re-fetch opp so we have fresh fields (message IDs etc.)
+  const oppFresh = await oppsTable.find(oppRecordId);
+  const oppFreshFields = oppFresh.fields || {};
+
+  // Build maps
+  const requestedMap = quoteFieldToMap(oppFreshFields[F.OPP_REQUESTED_QUOTE]);
+  const workingMap = quoteFieldToMap(oppFreshFields[F.OPP_SUPPLIER_QUOTE_WORKING]);
+
+  // Supplier server required
+  if (!SUPPLIER_GUILD_ID) throw new Error("SUPPLIER_GUILD_ID missing in env");
+
+  const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
+  const { requestedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFreshFields);
+  if (!requestedQuotesChId) throw new Error("Requested Quotes Channel ID missing on Supplier record");
+
+  const supplierCh = await supplierGuild.channels.fetch(String(requestedQuotesChId)).catch(() => null);
+  if (!supplierCh || !supplierCh.isTextBased()) {
+    throw new Error("Supplier requested quotes channel not found or not text-based");
+  }
+
+  // Build BOTH versions
+  const supplierEmbed = buildSupplierDraftEmbed({
+    oppFields: oppFreshFields,
+    requestedMap,
+    workingMap,
+    variant: "supplier",
+  });
+
+  const adminEmbed = buildSupplierDraftEmbed({
+    oppFields: oppFreshFields,
+    requestedMap,
+    workingMap,
+    variant: "admin",
+  });
+
+  // Supplier message: edit existing or send new
+  const existingSupplierMsgId = asText(oppFreshFields[F.OPP_SUPPLIER_QUOTE_MSG_ID]);
+  let supplierMsg = null;
+
+  if (existingSupplierMsgId) {
+    try {
+      supplierMsg = await supplierCh.messages.fetch(existingSupplierMsgId);
+      await supplierMsg.edit({
+        embeds: [supplierEmbed],
+        components: [buildSupplierMainRow(oppRecordId, false)],
+      });
+    } catch {}
+  }
+
+  if (!supplierMsg) {
+    supplierMsg = await supplierCh.send({
+      embeds: [supplierEmbed],
+      components: [buildSupplierMainRow(oppRecordId, false)],
+    });
+
+    await oppsTable.update(oppRecordId, {
+      [F.OPP_SUPPLIER_QUOTE_MSG_ID]: String(supplierMsg.id),
+    });
+  }
+
+  // Admin mirror (read-only)
+  if (ADMIN_DRAFT_QUOTES_CHANNEL_ID) {
+    const adminDraftCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
+    if (adminDraftCh && adminDraftCh.isTextBased()) {
+      const existingAdminMsgId = asText(oppFreshFields[F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]);
+
+      if (existingAdminMsgId) {
+        try {
+          const m = await adminDraftCh.messages.fetch(existingAdminMsgId);
+          await m.edit({ embeds: [adminEmbed] });
+        } catch {}
+      } else {
+        const m = await adminDraftCh.send({ embeds: [adminEmbed] });
+        await oppsTable.update(oppRecordId, {
+          [F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]: String(m.id),
+        });
+      }
+    }
+  }
+}
+
 async function closeOpportunityInternal(opportunityRecordId) {
   const guildId = await inferGuildId();
   if (!guildId) throw new Error("Could not infer guild id");
