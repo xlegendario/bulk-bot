@@ -268,8 +268,19 @@ function formatEtaBusinessDays(v) {
 // Our quote storage format is JSON in long-text fields:
 // { "36": 7, "36.5": 3, ... }
 function quoteFieldToMap(fieldValue) {
-  const obj = safeJsonParse(asText(fieldValue));
+  const raw = asText(fieldValue).trim();
+  if (!raw) return new Map();
+
+  // Try normal JSON first
+  let obj = safeJsonParse(raw);
+
+  // Fallback: accept single-quote JSON-like strings
+  if (!obj && raw.includes("'") && raw.includes("{")) {
+    obj = safeJsonParse(raw.replace(/'/g, '"'));
+  }
+
   if (!obj) return new Map();
+
   const m = new Map();
   for (const [k, v] of Object.entries(obj)) {
     const qty = Number(v);
@@ -277,6 +288,7 @@ function quoteFieldToMap(fieldValue) {
   }
   return m;
 }
+
 
 async function safeDefer(interaction, options) {
   try {
@@ -3745,27 +3757,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
           reserved = true;
           reservedDeltaMap = deltaMap;
 
-          // ✅ Close instantly if sold out
           if (reserveResult.totalRemaining === 0) {
             await closeOpportunityInternal(oppRecordId);
+
+            // ✅ After closing, the system locks commitments and syncs DMs.
+            // Do NOT continue and re-render this buyer's DM as "Submitted".
+            await interaction.editReply("✅ Submitted! Bulk sold out and is now closed.");
+            return;
           }
         }
       }
 
-      // Submit + snapshot
+      // ✅ mark this buyer as submitted + snapshot before we close
       await touchCommitment(commitment.id, {
         [F.COM_STATUS]: "Submitted",
         [F.COM_COMMITTED_AT]: new Date().toISOString(),
         [F.COM_LAST_ACTION]: "Submitted",
       });
-
       await snapshotCountedQuantities(commitment.id);
 
-      await recalcOpportunityTotals(oppRecordId);
-      await syncPublic(oppRecordId);
-      await refreshDmPanel(oppRecordId, commitment.id);
+      // ✅ now close immediately (this will lock commitments + build Requested Quote)
+      await closeOpportunityInternal(oppRecordId);
 
-      await interaction.editReply("✅ Submitted!");
+      // ✅ update public embed one last time (optional but nice)
+      await syncPublic(oppRecordId);
+
+      // ✅ DO NOT refreshDmPanel here (closeOpportunityInternal already syncs/locks DMs)
+      await interaction.editReply("✅ Submitted! Bulk sold out and is now closed.");
       return;
     } catch (err) {
       console.error("cart_submit error:", err);
