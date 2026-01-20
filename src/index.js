@@ -852,6 +852,24 @@ function buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currenc
   return lines.join(NL);
 }
 
+function splitTextToEmbedFields(text, maxLen = 1000) {
+  const lines = String(text || "").split("\n");
+  const chunks = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const next = cur ? `${cur}\n${line}` : line;
+    if (next.length > maxLen) {
+      if (cur) chunks.push(cur);
+      cur = line;
+    } else {
+      cur = next;
+    }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
   const embed = buildOpportunityEmbed(fields);
 
@@ -869,6 +887,43 @@ async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
 
   // ✅ extra polish spacer BEFORE the ladder
   embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
+
+  // =========================
+  // STOCK-LIMITED: show Remaining Quantity per size (live)
+  // =========================
+  const remainingRaw = asText(fields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+  if (remainingRaw) {
+    const remainingMap = quoteFieldToMap(remainingRaw);
+
+    // only sizes with qty > 0
+    const filtered = new Map();
+    for (const [s, q] of remainingMap.entries()) {
+      const n = Number(q) || 0;
+      if (n > 0) filtered.set(String(s), n);
+    }
+
+    const totalRemaining = Array.from(filtered.values()).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    const availabilityText = quoteMapToLinesQtyFirst(filtered); // "7x 41\n3x 42..."
+
+    const chunks = splitTextToEmbedFields(availabilityText, 1000);
+    const titleBase = `📦 Available now (live) — ${totalRemaining} pairs`;
+
+    chunks.slice(0, 6).forEach((chunkText, idx) => {
+      embed.addFields({
+        name: idx === 0 ? titleBase : "📦 Available now (cont.)",
+        value: chunkText || "(none)",
+        inline: false,
+      });
+    });
+
+    if (chunks.length > 6) {
+      embed.addFields({
+        name: "ℹ️ Note",
+        value: "Availability list is long; showing first part only.",
+        inline: false,
+      });
+    }
+  }
   return embed;
 }
 
@@ -3460,6 +3515,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // Only touch Remaining if there is any change vs last submitted snapshot
         if (deltaMap.size > 0) {
           const reserveResult = await withOppLock(oppRecordId, async () => {
+            // Re-read inside lock (avoids race conditions)
             const freshOpp = await oppsTable.find(oppRecordId);
             const f = freshOpp.fields || {};
 
@@ -3476,7 +3532,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               if (rem < delta) insufficient.push({ size: String(sizeKey), need: delta, remaining: rem });
             }
 
-            if (insufficient.length) return { ok: false, insufficient };
+            if (insufficient.length) {
+              return { ok: false, insufficient };
+            }
 
             // Apply deltas (positive => subtract, negative => add back)
             for (const [sizeKey, d] of deltaMap.entries()) {
@@ -3496,25 +3554,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
               remainingMap.set(size, Math.max(0, Math.round(nextRem)));
             }
 
+            // ✅ IMPORTANT: compute AFTER applying deltas
+            const totalRemaining = Array.from(remainingMap.values()).reduce((s, n) => s + (Number(n) || 0), 0);
+
             await oppsTable.update(oppRecordId, {
               [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(remainingMap),
             });
 
-            return { ok: true };
+            return { ok: true, totalRemaining };
           });
-
+          
           if (!reserveResult.ok) {
             const lines = reserveResult.insufficient
               .slice(0, 8)
               .map((x) => `• **${x.size}**: need **${x.need}**, remaining **${x.remaining}**`)
               .join(NL);
 
-            // If they were Editing, rollback cart qty so they aren't stuck
+            // If they were editing, rollback cart qty to last submitted snapshot so they aren't stuck
             if (status === "Editing") {
               await rollbackCartQtyToCounted(commitment.id);
               await refreshDmPanel(oppRecordId, commitment.id);
             }
-  
+
             await interaction.editReply(
               `⚠️ Not enough stock to submit your latest changes.${NL}${NL}${lines}${NL}${NL}` +
                 (status === "Editing"
@@ -3522,6 +3583,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
                   : "Please reduce quantities and try again.")
             );
             return;
+          }
+
+          // ✅ SUCCESS PATH: if we just sold out, close immediately
+          if (reserveResult.totalRemaining === 0) {
+            await closeOpportunityInternal(oppRecordId);
           }
 
           // Mark reservation so we can undo it if something later fails
@@ -3540,6 +3606,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await snapshotCountedQuantities(commitment.id);
       await recalcOpportunityTotals(oppRecordId);
+      await syncPublic(oppRecordId);
       await refreshDmPanel(oppRecordId, commitment.id);
 
       await interaction.editReply("✅ Submitted!");
@@ -3878,6 +3945,73 @@ app.post("/sync-opportunity-dms", async (req, res) => {
   }
 });
 
+async function closeOpportunityInternal(opportunityRecordId) {
+  const guildId = await inferGuildId();
+  if (!guildId) throw new Error("Could not infer guild id");
+  const guild = await client.guilds.fetch(guildId);
+
+  // ---- Load opportunity ----
+  const opp = await oppsTable.find(opportunityRecordId);
+  const oppFields = opp.fields || {};
+  const statusNow = asText(oppFields[F.OPP_STATUS]) || "";
+
+  // prevent double close
+  if (statusNow && statusNow !== "Open") return { alreadyClosed: true };
+
+  // Close the opportunity
+  await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
+
+  // Copy final unit price to commitments
+  const finalUnit = parseMoneyNumber(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
+  await setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, finalUnit);
+
+  // Load commitments
+  const commitments = await commitmentsTable
+    .select({
+      maxRecords: 1000,
+      filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}'`,
+    })
+    .all();
+
+  // Lock submitted/editing; cancel draft
+  for (const c of commitments) {
+    const st = asText(c.fields[F.COM_STATUS]) || "";
+    if (st === "Draft") {
+      await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
+    } else if (st === "Submitted" || st === "Editing") {
+      await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Locked" });
+    }
+  }
+
+  // Build requested quote from locked commitments
+  const locked = await commitmentsTable
+    .select({
+      maxRecords: 1000,
+      filterByFormula: `AND({${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}',{${F.COM_STATUS}}='Locked')`,
+    })
+    .all();
+
+  const lockedIds = locked.map((c) => c.id);
+  const requestedMap = await buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, lockedIds);
+  const requestedJson = mapToQuoteJson(requestedMap);
+
+  await oppsTable.update(opportunityRecordId, {
+    [F.OPP_REQUESTED_QUOTE]: requestedJson,
+    [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
+  });
+
+  // Post supplier + admin draft quote messages (existing function in your script)
+  const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+  await postSupplierDraftQuoteToSupplierServer({ oppRecordId: opportunityRecordId, oppFields, currency });
+
+  // Sync public + DMs to reflect closure
+  await syncPublic(opportunityRecordId);
+  await syncDms(opportunityRecordId);
+
+  return { closed: true };
+}
+
+
 app.post("/close-opportunity", async (req, res) => {
   try {
     if (!assertSecret(req, res)) return;
@@ -3887,163 +4021,8 @@ app.post("/close-opportunity", async (req, res) => {
       return res.status(400).json({ ok: false, error: "opportunityRecordId is required" });
     }
 
-    const guildId = await inferGuildId();
-    if (!guildId) {
-      return res.status(500).json({ ok: false, error: "Could not infer guild id" });
-    }
-    // main guild fetch (keeps parity with rest of system; also used for syncPublic/syncDms)
-    await client.guilds.fetch(guildId);
-
-    // ---- Load opportunity ----
-    const opp = await oppsTable.find(opportunityRecordId);
-    const oppFields = opp.fields || {};
-
-    // Close the opportunity
-    await oppsTable.update(opportunityRecordId, { [F.OPP_STATUS]: "Closed" });
-
-    // Copy final unit price to commitments (keeps your existing behavior)
-    const finalUnit = parseMoneyNumber(oppFields[F.OPP_CURRENT_SELL_PRICE] ?? oppFields[F.OPP_START_SELL_PRICE]);
-    await setFinalUnitPriceForOpportunityCommitments(opportunityRecordId, finalUnit);
-
-    // ---- Load all commitments for this opportunity ----
-    const commitments = await commitmentsTable
-      .select({
-        maxRecords: 1000,
-        filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(opportunityRecordId)}'`,
-      })
-      .all();
-
-    let locked = 0;
-    let cancelled = 0;
-
-    // ---- Lock/cancel only (NO deal channels, NO deposits here anymore) ----
-    for (const c of commitments) {
-      const st = asText(c.fields[F.COM_STATUS]) || "";
-
-      if (st === "Draft") {
-        await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
-        cancelled++;
-        continue;
-      }
-
-      if (st === "Submitted" || st === "Editing") {
-        await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Locked" });
-        locked++;
-        continue;
-      }
-
-      if (st === "Locked") locked++;
-    }
-
-    // ---- Build Requested Quote from locked commitments (Counted Quantity) ----
-    const lockedCommitmentIds = commitments
-      .filter((c) => {
-        const st = asText(c.fields[F.COM_STATUS]) || "";
-        return st === "Locked" || st === "Submitted" || st === "Editing";
-      })
-      .map((c) => c.id);
-
-    const requestedMap = await buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, lockedCommitmentIds);
-
-    const requestedJson = mapToQuoteJson(requestedMap);
-
-    // Default working quote = requested
-    await oppsTable.update(opportunityRecordId, {
-      [F.OPP_REQUESTED_QUOTE]: requestedJson,
-      [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
-      // optional (if you use it later)
-      // [F.OPP_SUPPLIER_QUOTE_STATUS]: "Pending",
-    });
-
-    // Re-fetch oppFields so we have fresh values (message IDs etc.)
-    const oppFresh = await oppsTable.find(opportunityRecordId);
-    const oppFreshFields = oppFresh.fields || {};
-
-    // ---- Post supplier draft quote embed in SUPPLIER server ----
-    if (!SUPPLIER_GUILD_ID) throw new Error("SUPPLIER_GUILD_ID missing in env");
-
-    const supplierGuild = await client.guilds.fetch(String(SUPPLIER_GUILD_ID));
-    const { requestedQuotesChId } = await getSupplierChannelIdsFromOpportunity(oppFreshFields);
-    if (!requestedQuotesChId) throw new Error("Requested Quotes Channel ID missing on Supplier record");
-
-    const supplierCh = await supplierGuild.channels.fetch(String(requestedQuotesChId)).catch(() => null);
-    if (!supplierCh || !supplierCh.isTextBased()) {
-      throw new Error("Supplier requested quotes channel not found or not text-based");
-    }
-
-    const workingMap = requestedMap;
-
-    // ✅ Build BOTH versions (supplier + admin mirror)
-    const supplierEmbed = buildSupplierDraftEmbed({
-      oppFields: oppFreshFields,
-      requestedMap,
-      workingMap,
-      variant: "supplier",
-    });
-
-    const adminEmbed = buildSupplierDraftEmbed({
-      oppFields: oppFreshFields,
-      requestedMap,
-      workingMap,
-      variant: "admin",
-    });
-
-    // --- Supplier message: edit existing or send new
-    const existingSupplierMsgId = asText(oppFreshFields[F.OPP_SUPPLIER_QUOTE_MSG_ID]);
-    let supplierMsg = null;
-
-    if (existingSupplierMsgId) {
-      try {
-        supplierMsg = await supplierCh.messages.fetch(existingSupplierMsgId);
-        await supplierMsg.edit({
-          embeds: [supplierEmbed],
-          components: [buildSupplierMainRow(opportunityRecordId, false)],
-        });
-      } catch {}
-    }
-
-    if (!supplierMsg) {
-      supplierMsg = await supplierCh.send({
-        embeds: [supplierEmbed],
-        components: [buildSupplierMainRow(opportunityRecordId, false)],
-      });
-
-      await oppsTable.update(opportunityRecordId, {
-        [F.OPP_SUPPLIER_QUOTE_MSG_ID]: String(supplierMsg.id),
-      });
-    }
-
-    // --- Admin draft mirror (read-only)
-    if (ADMIN_DRAFT_QUOTES_CHANNEL_ID) {
-      const adminDraftCh = await client.channels.fetch(String(ADMIN_DRAFT_QUOTES_CHANNEL_ID)).catch(() => null);
-      if (adminDraftCh && adminDraftCh.isTextBased()) {
-        const existingAdminMsgId = asText(oppFreshFields[F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]);
-
-        if (existingAdminMsgId) {
-          try {
-            const m = await adminDraftCh.messages.fetch(existingAdminMsgId);
-            await m.edit({ embeds: [adminEmbed] });
-          } catch {}
-        } else {
-          const m = await adminDraftCh.send({ embeds: [adminEmbed] });
-          await oppsTable.update(opportunityRecordId, {
-            [F.OPP_ADMIN_DRAFT_QUOTE_MSG_ID]: String(m.id),
-          });
-        }
-      }
-    }
-
-    // ---- Sync public + DMs so UI locks visually ----
-    await syncPublic(opportunityRecordId);
-    await syncDms(opportunityRecordId);
-
-    return res.json({
-      ok: true,
-      closed: true,
-      stage: "awaiting_supplier_quote",
-      locked,
-      cancelled,
-    });
+    await closeOpportunityInternal(opportunityRecordId);
+    return res.json({ ok: true, closed: true });
   } catch (err) {
     console.error("close-opportunity error:", err);
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
