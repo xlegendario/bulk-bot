@@ -3600,7 +3600,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Clear cart (Draft only)
   if (interaction.isButton() && interaction.customId.startsWith("cart_clear:")) {
     const oppRecordId = interaction.customId.split("cart_clear:")[1];
-    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply(deferEphemeralIfGuild(!!interaction.guildId));
+    }  
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -3631,9 +3633,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
     // cart_submit:<oppId>
     const oppRecordId = interaction.customId.split(":")[1];
-
-    const inGuild = !!interaction.guildId;
-    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
       // Only in DMs (your existing behavior)
