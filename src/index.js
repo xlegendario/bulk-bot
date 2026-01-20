@@ -3412,13 +3412,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Join Bulk
   if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
-    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
-    if (!okDefer) return;
-
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!okDefer) return;
 
+    // ✅ Only defer ONCE. This click happens in the server, so inGuild = true.
+    const okJoin = await safeDeferReply(interaction, deferEphemeralIfGuild(true));
+    if (!okJoin) return;
 
     try {
       const opp = await oppsTable.find(opportunityRecordId);
