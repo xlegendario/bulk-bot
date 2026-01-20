@@ -2509,7 +2509,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       cid.startsWith(`${SKUREQ.QUOTE}:`) ||
       cid === REQ.BTN_OPEN ||
       cid.startsWith(`${FULLRUN.BTN}:`) ||
-      cid.startsWith("size_pick:")
+      cid.startsWith("size_pick:") ||
       // ✅ These handlers already call interaction.deferReply() themselves
       cid.startsWith("opp_join:") ||
       cid.startsWith("cart_addmore:") ||
