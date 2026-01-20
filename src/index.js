@@ -3405,20 +3405,46 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Submit cart (Draft/Editing -> Submitted)
   if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
-    const oppRecordId = interaction.customId.split("cart_submit:")[1];
+    // cart_submit:<oppId>
+    const oppRecordId = interaction.customId.split(":")[1];
+
+    const inGuild = !!interaction.guildId;
     await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
     try {
-      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
-      if (!commitment) return void (await interaction.editReply("🧾 No cart found yet."));
-
-      const status = await getCommitmentStatus(commitment.id);
-      if (status !== "Draft" && status !== "Editing") {
-        return void (await interaction.editReply("⚠️ This commitment can’t be submitted right now."));
+      // Only in DMs (your existing behavior)
+      if (inGuild) {
+        await interaction.editReply("⚠️ Please use your DM cart to submit.");
+        scheduleDeleteInteractionReply(interaction, 2500);
+        return;
       }
 
+      // Find commitment + status
+      const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
+      if (!commitment) {
+        await interaction.editReply("❌ No cart found for this bulk.");
+        scheduleDeleteInteractionReply(interaction, 2500);
+        return;
+      }
+
+      const status = asText(commitment.fields?.[F.COM_STATUS]) || "Draft";
+      if (!EDITABLE_STATUSES.has(status)) {
+        await interaction.editReply("⚠️ Your cart is not editable.");
+        scheduleDeleteInteractionReply(interaction, 2500);
+        return;
+      }
+
+      // Empty cart check
       const cartText = await getCartLinesText(commitment.id);
-      if (cartText.includes("No sizes selected")) return void (await interaction.editReply("⚠️ Your cart is empty."));
+      if (cartText.includes("No sizes selected")) {
+        await interaction.editReply("⚠️ Your cart is empty.");
+        scheduleDeleteInteractionReply(interaction, 2500);
+        return;
+      }
+
+      // ===== Remaining reservation bookkeeping (for rollback on failure) =====
+      let reserved = false;
+      let reservedDeltaMap = null;
 
       // =========================
       // STOCK-LIMITED BULKS: reserve Remaining Quantity atomically on Submit
@@ -3428,14 +3454,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const remainingRaw = asText(oppFields?.[F.OPP_REMAINING_QTY_JSON]).trim();
       if (remainingRaw) {
-        // delta = (current cart qty) - (last submitted snapshot qty)
         const { qtyMap, countedMap } = await getCommitmentLineMaps(commitment.id);
         const deltaMap = calcDeltaMap(qtyMap, countedMap);
 
-        // Only touch Remaining if there is any change
+        // Only touch Remaining if there is any change vs last submitted snapshot
         if (deltaMap.size > 0) {
           const reserveResult = await withOppLock(oppRecordId, async () => {
-            // Re-read inside lock (avoids race conditions)
             const freshOpp = await oppsTable.find(oppRecordId);
             const f = freshOpp.fields || {};
 
@@ -3485,46 +3509,76 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .map((x) => `• **${x.size}**: need **${x.need}**, remaining **${x.remaining}**`)
               .join(NL);
 
-            // If they were editing, rollback cart qty to last submitted snapshot so they aren't stuck
+            // If they were Editing, rollback cart qty so they aren't stuck
             if (status === "Editing") {
               await rollbackCartQtyToCounted(commitment.id);
               await refreshDmPanel(oppRecordId, commitment.id);
             }
-
+  
             await interaction.editReply(
               `⚠️ Not enough stock to submit your latest changes.${NL}${NL}${lines}${NL}${NL}` +
-              (status === "Editing"
-                ? "I rolled your cart back to your last submitted quantities."
-                : "Please reduce quantities and try again.")
+                (status === "Editing"
+                  ? "I rolled your cart back to your last submitted quantities."
+                  : "Please reduce quantities and try again.")
             );
             return;
           }
+
+          // Mark reservation so we can undo it if something later fails
+          reserved = true;
+          reservedDeltaMap = deltaMap;
         }
       }
 
+      // =========================
+      // Existing behavior: Submit + Snapshot + Recalc + Refresh DM
+      // =========================
       await touchCommitment(commitment.id, {
         [F.COM_STATUS]: "Submitted",
-        [F.COM_COMMITTED_AT]: new Date().toISOString(),
-        [F.COM_LAST_ACTION]: "Submitted",
+        [F.COM_LAST_ACTION]: "Submitted cart",
       });
 
-      // snapshot counted qty so totals/tiers reflect last submitted state
       await snapshotCountedQuantities(commitment.id);
-
-      // update totals/tiers
       await recalcOpportunityTotals(oppRecordId);
       await refreshDmPanel(oppRecordId, commitment.id);
 
-      // Avoid DM clutter: delete interaction reply in DMs (panel shows status/last update)
-      if (!interaction.guildId) {
-        await interaction.deleteReply().catch(() => {});
-        return;
-      }
-      await interaction.editReply("✅ Submitted.");
+      await interaction.editReply("✅ Submitted!");
+      scheduleDeleteInteractionReply(interaction, 1500);
       return;
     } catch (err) {
       console.error("cart_submit error:", err);
-      await interaction.editReply("⚠️ Could not submit.");
+
+      // ===== Rollback Remaining reservation if we already reserved but submit failed =====
+      // This prevents "ghost reserved stock" when Airtable update fails after reserving.
+      try {
+        // We can only rollback if we had a delta map reservation
+        if (typeof reserved !== "undefined" && reserved && reservedDeltaMap && reservedDeltaMap.size > 0) {
+          await withOppLock(oppRecordId, async () => {
+            const freshOpp = await oppsTable.find(oppRecordId);
+            const f = freshOpp.fields || {};
+            const remainingMap = quoteFieldToMap(f?.[F.OPP_REMAINING_QTY_JSON]);
+
+            // Undo reservation: add back same delta values
+            for (const [sizeKey, d] of reservedDeltaMap.entries()) {
+              const size = String(sizeKey);
+              const delta = Number(d) || 0;
+              if (delta === 0) continue;
+
+              const remNow = Number(remainingMap.get(size) ?? 0) || 0;
+              remainingMap.set(size, Math.max(0, Math.round(remNow + delta)));
+            }
+
+            await oppsTable.update(oppRecordId, {
+              [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(remainingMap),
+            });
+          });
+        }
+      } catch (e) {
+        console.warn("⚠️ Failed to rollback Remaining after cart_submit failure:", e?.message || e);
+      }
+
+      await interaction.editReply("⚠️ Could not submit. Try again.");
+      scheduleDeleteInteractionReply(interaction, 2500);
       return;
     }
   }
