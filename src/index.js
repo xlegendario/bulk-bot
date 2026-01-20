@@ -3758,10 +3758,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
           reservedDeltaMap = deltaMap;
 
           if (reserveResult.totalRemaining === 0) {
+            // ✅ IMPORTANT: snapshot THIS buyer first so Requested Quote has sizes
+            await touchCommitment(commitment.id, {
+              [F.COM_STATUS]: "Submitted",
+              [F.COM_COMMITTED_AT]: new Date().toISOString(),
+              [F.COM_LAST_ACTION]: "Submitted",
+            });
+            await snapshotCountedQuantities(commitment.id);
+
+            // ✅ Now close immediately (this locks commitments + builds Requested Quote correctly)
             await closeOpportunityInternal(oppRecordId);
 
-            // ✅ After closing, the system locks commitments and syncs DMs.
-            // Do NOT continue and re-render this buyer's DM as "Submitted".
+            // ✅ Update public one last time (optional)
+            await syncPublic(oppRecordId);
+
+            // ✅ Do NOT refreshDmPanel here (closeOpportunityInternal already syncs/locks DMs)
             await interaction.editReply("✅ Submitted! Bulk sold out and is now closed.");
             return;
           }
