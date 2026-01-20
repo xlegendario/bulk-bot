@@ -2567,20 +2567,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // supq_size:<oppId>:<size>
     const parts = interaction.customId.split(":");
     const oppRecordId = parts[1];
-    const size = parts.slice(2).join(":"); // safe even if size contains weird chars
+    const size = parts.slice(2).join(":");
 
     if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
       await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
       return;
     }
 
-    const opp = await oppsTable.find(oppRecordId);
-    const oppFields = opp.fields || {};
-
-    const requestedMap = quoteFieldToMap(oppFields[F.OPP_REQUESTED_QUOTE]);
-    const requestedQty = requestedMap.get(String(size));
-    const placeholder = Number.isFinite(requestedQty) ? `requested quantity: ${requestedQty}` : "enter available qty";
-
+    // ✅ IMPORTANT: do NOT do Airtable fetch before showModal (prevents 10062)
     const modal = new ModalBuilder()
       .setCustomId(`${SUPQ.MODAL}:${oppRecordId}:${size}`)
       .setTitle(`Set available qty — ${size}`);
@@ -2590,7 +2584,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       .setLabel("Available quantity")
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
-      .setPlaceholder(placeholder);
+      .setPlaceholder("enter available qty");
 
     modal.addComponents(new ActionRowBuilder().addComponents(input));
     await interaction.showModal(modal);
@@ -3422,7 +3416,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!ok) return;
 
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!ok) return;
+
 
     try {
       const opp = await oppsTable.find(opportunityRecordId);
@@ -3489,7 +3485,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Add More
   if (interaction.isButton() && interaction.customId.startsWith("cart_addmore:")) {
     const oppRecordId = interaction.customId.split("cart_addmore:")[1];
-    await interaction.deferReply(deferEphemeralIfGuild(inGuild));
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!ok) return;
+
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -3608,12 +3606,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Clear cart (Draft only)
   if (interaction.isButton() && interaction.customId.startsWith("cart_clear:")) {
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
-    if (!ok) return;
     const oppRecordId = interaction.customId.split("cart_clear:")[1];
-    if (!interaction.deferred && !interaction.replied) {
-      await interaction.deferReply(deferEphemeralIfGuild(!!interaction.guildId));
-    }  
+    const inGuild = !!interaction.guildId;
+
+    // ✅ SAFELY acknowledge
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!ok) return;
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -3626,11 +3624,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await touchCommitment(commitment.id, { [F.COM_STATUS]: "Draft", [F.COM_LAST_ACTION]: "Cleared cart" });
       await refreshDmPanel(oppRecordId, commitment.id);
 
-      // Avoid DM clutter
       if (!interaction.guildId) {
         await interaction.deleteReply().catch(() => {});
         return;
       }
+
       await interaction.editReply("🧹 Cleared.");
       return;
     } catch (err) {
@@ -3640,72 +3638,56 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
+
   // Submit cart (Draft/Editing -> Submitted)
   if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
-     // ✅ Always acknowledge this interaction (fixes InteractionNotReplied)
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
-    if (!ok) return;
-
-    // cart_submit:<oppId>
     const oppRecordId = interaction.customId.split(":")[1];
+    const inGuild = !!interaction.guildId;
+
+    // ✅ SAFELY acknowledge (prevents InteractionNotReplied)
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!ok) return;
 
     try {
       // Only in DMs (your existing behavior)
       if (inGuild) {
         await interaction.editReply("⚠️ Please use your DM cart to submit.");
-        scheduleDeleteInteractionReply(interaction, 2500);
         return;
       }
 
-      // Find commitment + status
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
-      if (!commitment) {
-        await interaction.editReply("❌ No cart found for this bulk.");
-        scheduleDeleteInteractionReply(interaction, 2500);
-        return;
-      }
+      if (!commitment) return void (await interaction.editReply("🧾 No cart found yet."));
 
       const status = asText(commitment.fields?.[F.COM_STATUS]) || "Draft";
       if (!EDITABLE_STATUSES.has(status)) {
-        await interaction.editReply("⚠️ Your cart is not editable.");
-        scheduleDeleteInteractionReply(interaction, 2500);
-        return;
+        return void (await interaction.editReply("⚠️ This commitment can’t be submitted right now."));
       }
 
-      // Empty cart check
       const cartText = await getCartLinesText(commitment.id);
       if (cartText.includes("No sizes selected")) {
-        await interaction.editReply("⚠️ Your cart is empty.");
-        scheduleDeleteInteractionReply(interaction, 2500);
-        return;
+        return void (await interaction.editReply("⚠️ Your cart is empty."));
       }
 
       // ===== Remaining reservation bookkeeping (for rollback on failure) =====
       let reserved = false;
       let reservedDeltaMap = null;
 
-      // =========================
-      // STOCK-LIMITED BULKS: reserve Remaining Quantity atomically on Submit
-      // =========================
       const opp = await oppsTable.find(oppRecordId);
       const oppFields = opp.fields || {};
-
       const remainingRaw = asText(oppFields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+
       if (remainingRaw) {
         const { qtyMap, countedMap } = await getCommitmentLineMaps(commitment.id);
         const deltaMap = calcDeltaMap(qtyMap, countedMap);
 
-        // Only touch Remaining if there is any change vs last submitted snapshot
         if (deltaMap.size > 0) {
           const reserveResult = await withOppLock(oppRecordId, async () => {
-            // Re-read inside lock (avoids race conditions)
             const freshOpp = await oppsTable.find(oppRecordId);
             const f = freshOpp.fields || {};
 
             const remainingMap = quoteFieldToMap(f?.[F.OPP_REMAINING_QTY_JSON]);
             const allowedMap = quoteFieldToMap(f?.[F.OPP_ALLOWED_QTY_JSON]); // optional cap
 
-            // Check only positive deltas (increases)
             const insufficient = [];
             for (const [sizeKey, d] of deltaMap.entries()) {
               const delta = Number(d) || 0;
@@ -3715,29 +3697,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
               if (rem < delta) insufficient.push({ size: String(sizeKey), need: delta, remaining: rem });
             }
 
-            if (insufficient.length) {
-              return { ok: false, insufficient };
-            }
+            if (insufficient.length) return { ok: false, insufficient };
 
-            // Apply deltas (positive => subtract, negative => add back)
             for (const [sizeKey, d] of deltaMap.entries()) {
-              const size = String(sizeKey);
+              const sizeKeyStr = String(sizeKey);
               const delta = Number(d) || 0;
               if (delta === 0) continue;
 
-              const remNow = Number(remainingMap.get(size) ?? 0) || 0;
+              const remNow = Number(remainingMap.get(sizeKeyStr) ?? 0) || 0;
               let nextRem = remNow - delta;
 
-              // If Allowed exists, cap max to Allowed
               if (allowedMap.size > 0) {
-                const cap = Number(allowedMap.get(size) ?? nextRem);
+                const cap = Number(allowedMap.get(sizeKeyStr) ?? nextRem);
                 if (Number.isFinite(cap)) nextRem = Math.min(nextRem, cap);
               }
 
-              remainingMap.set(size, Math.max(0, Math.round(nextRem)));
+              remainingMap.set(sizeKeyStr, Math.max(0, Math.round(nextRem)));
             }
 
-            // ✅ IMPORTANT: compute AFTER applying deltas
             const totalRemaining = Array.from(remainingMap.values()).reduce((s, n) => s + (Number(n) || 0), 0);
 
             await oppsTable.update(oppRecordId, {
@@ -3746,14 +3723,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             return { ok: true, totalRemaining };
           });
-          
+
           if (!reserveResult.ok) {
             const lines = reserveResult.insufficient
               .slice(0, 8)
               .map((x) => `• **${x.size}**: need **${x.need}**, remaining **${x.remaining}**`)
               .join(NL);
 
-            // If they were editing, rollback cart qty to last submitted snapshot so they aren't stuck
             if (status === "Editing") {
               await rollbackCartQtyToCounted(commitment.id);
               await refreshDmPanel(oppRecordId, commitment.id);
@@ -3768,16 +3744,64 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return;
           }
 
-          // ✅ SUCCESS PATH: if we just sold out, close immediately
+          reserved = true;
+          reservedDeltaMap = deltaMap;
+
+          // ✅ Close instantly if sold out
           if (reserveResult.totalRemaining === 0) {
             await closeOpportunityInternal(oppRecordId);
           }
-
-          // Mark reservation so we can undo it if something later fails
-          reserved = true;
-          reservedDeltaMap = deltaMap;
         }
       }
+
+      // Submit + snapshot
+      await touchCommitment(commitment.id, {
+        [F.COM_STATUS]: "Submitted",
+        [F.COM_COMMITTED_AT]: new Date().toISOString(),
+        [F.COM_LAST_ACTION]: "Submitted",
+      });
+
+      await snapshotCountedQuantities(commitment.id);
+
+      await recalcOpportunityTotals(oppRecordId);
+      await syncPublic(oppRecordId);
+      await refreshDmPanel(oppRecordId, commitment.id);
+
+      await interaction.editReply("✅ Submitted!");
+      return;
+    } catch (err) {
+      console.error("cart_submit error:", err);
+
+      // rollback Remaining if we reserved but later failed
+      try {
+        if (reserved && reservedDeltaMap && reservedDeltaMap.size > 0) {
+          await withOppLock(oppRecordId, async () => {
+            const freshOpp = await oppsTable.find(oppRecordId);
+            const f = freshOpp.fields || {};
+            const remainingMap = quoteFieldToMap(f?.[F.OPP_REMAINING_QTY_JSON]);
+
+            for (const [sizeKey, d] of reservedDeltaMap.entries()) {
+              const sizeKeyStr = String(sizeKey);
+              const delta = Number(d) || 0;
+              if (delta === 0) continue;
+
+              const remNow = Number(remainingMap.get(sizeKeyStr) ?? 0) || 0;
+              remainingMap.set(sizeKeyStr, Math.max(0, Math.round(remNow + delta)));
+            }
+
+            await oppsTable.update(oppRecordId, {
+              [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(remainingMap),
+            });
+          });
+        }
+      } catch (e) {
+        console.warn("⚠️ Failed to rollback Remaining after submit failure:", e?.message || e);
+      }
+
+      await interaction.editReply("⚠️ Could not submit. Try again.");
+      return;
+    }
+  }
 
       // =========================
       // Existing behavior: Submit + Snapshot + Recalc + Refresh DM
