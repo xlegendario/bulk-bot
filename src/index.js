@@ -2510,6 +2510,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       cid === REQ.BTN_OPEN ||
       cid.startsWith(`${FULLRUN.BTN}:`) ||
       cid.startsWith("size_pick:")
+      // ✅ These handlers already call interaction.deferReply() themselves
+      cid.startsWith("opp_join:") ||
+      cid.startsWith("cart_addmore:") ||
+      cid.startsWith("cart_submit:") ||
+      cid.startsWith("cart_clear:")
     );
 
   if (!skipAutoDefer) {
