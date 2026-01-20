@@ -903,7 +903,7 @@ async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
     }
 
     const totalRemaining = Array.from(filtered.values()).reduce((sum, n) => sum + (Number(n) || 0), 0);
-    const availabilityText = quoteMapToLinesQtyFirst(filtered); // "7x 41\n3x 42..."
+    const availabilityText = quoteMapToLinesQtyFirst(filtered);
 
     const chunks = splitTextToEmbedFields(availabilityText, 1000);
     const titleBase = `📦 Available now (live) — ${totalRemaining} pairs`;
