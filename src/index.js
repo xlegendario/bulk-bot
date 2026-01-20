@@ -1065,24 +1065,70 @@ function safeDeleteMessage(msg, ms = AUTO_DELETE_MS) {
 // Patch interaction methods globally
 const _reply = BaseInteraction.prototype.reply;
 BaseInteraction.prototype.reply = async function (options) {
-  const res = await _reply.call(this, options);
-  safeDeleteReply(this, AUTO_DELETE_MS);
-  return res;
+  try {
+    const res = await _reply.call(this, options);
+    safeDeleteReply(this, AUTO_DELETE_MS);
+    return res;
+  } catch (err) {
+    const code = err?.code ?? err?.rawError?.code;
+    if (code === 10062 || code === "InteractionAlreadyReplied" || code === 40060) {
+      console.warn("⚠️ reply ignored:", code);
+      return;
+    }
+    throw err;
+  }
 };
+
 
 const _editReply = BaseInteraction.prototype.editReply;
 BaseInteraction.prototype.editReply = async function (options) {
-  const res = await _editReply.call(this, options);
-  safeDeleteReply(this, AUTO_DELETE_MS);
-  return res;
+  try {
+    const res = await _editReply.call(this, options);
+    safeDeleteReply(this, AUTO_DELETE_MS);
+    return res;
+  } catch (err) {
+    const code = err?.code ?? err?.rawError?.code;
+    if (code === 10062) {
+      console.warn("⚠️ editReply ignored: interaction expired (10062)");
+      return;
+    }
+    throw err;
+  }
 };
+
 
 const _deferReply = BaseInteraction.prototype.deferReply;
 BaseInteraction.prototype.deferReply = async function (options) {
-  const res = await _deferReply.call(this, options);
-  // This will only delete if a reply actually exists later. Safe to call.
-  safeDeleteReply(this, AUTO_DELETE_MS);
-  return res;
+  try {
+    // ✅ If already acknowledged, do nothing (prevents InteractionAlreadyReplied)
+    if (this.deferred || this.replied) return;
+
+    const res = await _deferReply.call(this, options);
+
+    // Auto-delete the main reply later (harmless if no reply ultimately exists)
+    safeDeleteReply(this, AUTO_DELETE_MS);
+
+    return res;
+  } catch (err) {
+    // ✅ Swallow the two common cases that break UX:
+    // - 10062: Unknown interaction (expired)
+    // - InteractionAlreadyReplied: already acknowledged somewhere else
+    const code = err?.code ?? err?.rawError?.code;
+
+    if (code === 10062 || code === "InteractionAlreadyReplied") {
+      console.warn("⚠️ deferReply ignored:", code);
+      return;
+    }
+
+    // Another common Discord "already acknowledged" code is 40060
+    if (code === 40060) {
+      console.warn("⚠️ deferReply ignored: already acknowledged (40060)");
+      return;
+    }
+
+    // Anything else: rethrow so you still see real bugs
+    throw err;
+  }
 };
 
 const _followUp = BaseInteraction.prototype.followUp;
