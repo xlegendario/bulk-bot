@@ -2262,7 +2262,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const preset = await getPresetById(presetId).catch(() => null);
     if (!preset || !preset.ladder.length) {
-      await interaction.editReply("❌ Could not load that brand ladder.");
+      await interaction.reply({ content: "❌ Could not load that brand ladder.", flags: MessageFlags.Ephemeral });
       return;
     }
 
