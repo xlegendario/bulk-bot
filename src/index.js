@@ -3412,12 +3412,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Join Bulk
   if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
-    if (!ok) return;
+    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
+    if (!okDefer) return;
 
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!ok) return;
+    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okDefer) return;
 
 
     try {
@@ -3485,8 +3485,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Add More
   if (interaction.isButton() && interaction.customId.startsWith("cart_addmore:")) {
     const oppRecordId = interaction.customId.split("cart_addmore:")[1];
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!ok) return;
+    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okDefer) return;
 
 
     try {
@@ -3610,8 +3610,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const inGuild = !!interaction.guildId;
 
     // ✅ SAFELY acknowledge
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!ok) return;
+    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okDefer) return;
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -3645,8 +3645,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const inGuild = !!interaction.guildId;
 
     // ✅ SAFELY acknowledge (prevents InteractionNotReplied)
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!ok) return;
+    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okDefer) return;
 
     try {
       // Only in DMs (your existing behavior)
