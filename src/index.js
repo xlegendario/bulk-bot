@@ -3418,6 +3418,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Join Bulk
   if (interaction.isButton() && interaction.customId.startsWith("opp_join:")) {
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
+    if (!ok) return;
+
     const opportunityRecordId = interaction.customId.split("opp_join:")[1];
     await interaction.deferReply(deferEphemeralIfGuild(inGuild));
 
@@ -3605,6 +3608,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Clear cart (Draft only)
   if (interaction.isButton() && interaction.customId.startsWith("cart_clear:")) {
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
+    if (!ok) return;
     const oppRecordId = interaction.customId.split("cart_clear:")[1];
     if (!interaction.deferred && !interaction.replied) {
       await interaction.deferReply(deferEphemeralIfGuild(!!interaction.guildId));
@@ -3637,6 +3642,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   // Submit cart (Draft/Editing -> Submitted)
   if (interaction.isButton() && interaction.customId.startsWith("cart_submit:")) {
+     // ✅ Always acknowledge this interaction (fixes InteractionNotReplied)
+    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(false));
+    if (!ok) return;
+
     // cart_submit:<oppId>
     const oppRecordId = interaction.customId.split(":")[1];
 
