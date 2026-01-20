@@ -873,60 +873,23 @@ function splitTextToEmbedFields(text, maxLen = 1000) {
 async function buildOpportunityEmbedWithLadder(oppRecordId, fields) {
   const embed = buildOpportunityEmbed(fields);
 
-  // =========================
-  // STOCK-LIMITED: show Remaining Quantity per size (live)
-  // (IMPORTANT: must run even if tiers are missing)
-  // =========================
-  const remainingRaw = asText(fields?.[F.OPP_REMAINING_QTY_JSON]).trim();
-  if (remainingRaw) {
-    const remainingMap = quoteFieldToMap(remainingRaw);
+  // Only add ladder for non-limited opportunities
+  const isLimited = !!asText(fields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+  if (isLimited) return embed;
 
-    const filtered = new Map();
-    for (const [s, q] of remainingMap.entries()) {
-      const n = Number(q) || 0;
-      if (n > 0) filtered.set(String(s), n);
-    }
-
-    const totalRemaining = Array.from(filtered.values()).reduce((sum, n) => sum + (Number(n) || 0), 0);
-    const availabilityText = quoteMapToLinesQtyFirst(filtered);
-
-    const chunks = splitTextToEmbedFields(availabilityText, 1000);
-    const titleBase = `📦 Available now (live) — ${totalRemaining} pairs`;
-
-    chunks.slice(0, 6).forEach((chunkText, idx) => {
-      embed.addFields({
-        name: idx === 0 ? titleBase : "📦 Available now (cont.)",
-        value: chunkText || "(none)",
-        inline: false,
-      });
-    });
-
-    if (chunks.length > 6) {
-      embed.addFields({
-        name: "ℹ️ Note",
-        value: "Availability list is long; showing first part only.",
-        inline: false,
-      });
-    }
-  }
-
-  // =========================
-  // Discount ladder (optional)
-  // =========================
   const startPrice = Number(asText(fields[F.OPP_START_SELL_PRICE]));
   const currentTotalPairs = Number(asText(fields[F.OPP_CURRENT_TOTAL_PAIRS] || 0));
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
 
-  if (Number.isFinite(startPrice)) {
-    const tiers = await fetchTiersForOpportunity(oppRecordId).catch(() => []);
-    if (Array.isArray(tiers) && tiers.length) {
-      const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
-      if (ladder) {
-        embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
-      }
-    }
-  }
+  if (!Number.isFinite(startPrice)) return embed;
 
+  const tiers = await fetchTiersForOpportunity(oppRecordId).catch(() => []);
+  if (!tiers.length) return embed;
+
+  const ladder = buildDiscountLadderText({ tiers, startPrice, currentTotalPairs, currency });
+  if (!ladder) return embed;
+
+  embed.addFields({ name: "📉 Discount ladder", value: ladder, inline: false });
   return embed;
 }
 
@@ -1535,20 +1498,21 @@ function buildOpportunityEmbed(fields) {
   const maxSize = asText(fields[F.OPP_MAX_SIZE]) || "—";
   const currency = asText(fields[F.OPP_CURRENCY]) || "EUR";
 
-  const etaLine = formatEtaBusinessDays(fields[F.OPP_ETA_BUSINESS_DAYS]); // "ETA: 5 business days"
+  const etaLine = formatEtaBusinessDays(fields[F.OPP_ETA_BUSINESS_DAYS]);
   const currentPrice = formatMoney(currency, fields[F.OPP_CURRENT_SELL_PRICE] ?? fields[F.OPP_START_SELL_PRICE]);
-  const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
   const currentTotalPairs = asText(fields[F.OPP_CURRENT_TOTAL_PAIRS]) || "—";
-  const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
-  const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]) || "—";
 
   const picUrl = getAirtableAttachmentUrl(fields[F.OPP_PICTURE]);
   const closeAtUnix = toUnixSecondsFromAirtableDate(fields[F.OPP_CLOSE_AT]);
   const closeCountdown = fmtDiscordRelative(closeAtUnix);
 
-  const SP = "\u200B"; // reliable visual spacer line in Discord embeds
+  const SP = "\u200B";
 
-  const desc = [
+  // Detect stock-limited
+  const remainingRaw = asText(fields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+  const isLimited = !!remainingRaw;
+
+  const descLines = [
     `**SKU:** \`${sku}\``,
     `**Size Range:** \`${minSize} → ${maxSize}\``,
 
@@ -1556,27 +1520,65 @@ function buildOpportunityEmbed(fields) {
     etaLine ? `**${etaLine}**` : null,
 
     SP,
-    `**Current Price:** **${currentPrice}**`,
-    `**Current Discount:** **${currentDiscount}**`,
-    `**Current Total Pairs:** **${currentTotalPairs}**`,
+    `**Price:** **${currentPrice}**`,
+    `**Total Joined Pairs:** **${currentTotalPairs}**`,
+  ].filter(Boolean);
 
-    SP,
-    `**MOQ for Next Tier:** **${nextMinPairs}**`,
-    `**Next Tier Discount:** **${nextDiscount}**`,
+  if (isLimited) {
+    // Add urgency note
+    descLines.push(SP, `⚠️ **Limited stock (first come, first served)**`);
+  } else {
+    // Normal bulk tier info (keep your existing behavior)
+    const currentDiscount = formatPercent(fields[F.OPP_CURRENT_DISCOUNT] ?? 0);
+    const nextMinPairs = asText(fields[F.OPP_NEXT_MIN_PAIRS]) || "—";
+    const nextDiscount = formatPercent(fields[F.OPP_NEXT_DISCOUNT]) || "—";
 
-    SP,
-    `**Closes:** **${closeCountdown}**`,
-  ].filter(Boolean).join(NL);
+    descLines.push(
+      SP,
+      `**Current Discount:** **${currentDiscount}**`,
+      SP,
+      `**MOQ for Next Tier:** **${nextMinPairs}**`,
+      `**Next Tier Discount:** **${nextDiscount}**`
+    );
+  }
+
+  descLines.push(SP, `**Closes:** **${closeCountdown}**`);
 
   const title = productName.length > 256 ? productName.slice(0, 253) + "..." : productName;
 
   const embed = new EmbedBuilder()
     .setTitle(title)
-    .setDescription(desc)
-    .setFooter({ text: "Join with any quantity • Price locks when bulk closes" })
+    .setDescription(descLines.filter(Boolean).join(NL))
+    .setFooter({ text: isLimited ? "Limited stock • Quantity deducted on submit" : "Join with any quantity • Price locks when bulk closes" })
     .setColor(0xffd300);
 
   if (picUrl) embed.setThumbnail(picUrl);
+
+  // For limited stock, show per-size Remaining (live)
+  if (isLimited) {
+    const remainingMap = quoteFieldToMap(remainingRaw);
+
+    const filtered = new Map();
+    for (const [s, q] of remainingMap.entries()) {
+      const n = Number(q) || 0;
+      if (n > 0) filtered.set(String(s), n);
+    }
+
+    const totalRemaining = Array.from(filtered.values()).reduce((sum, n) => sum + (Number(n) || 0), 0);
+    const availabilityText = quoteMapToLinesQtyFirst(filtered);
+
+    const chunks = splitTextToEmbedFields(availabilityText, 1000);
+    const titleBase = `📦 Available now (live) — ${totalRemaining} pairs`;
+
+    chunks.slice(0, 6).forEach((chunkText, idx) => {
+      embed.addFields({
+        name: idx === 0 ? titleBase : "📦 Available now (cont.)",
+        value: chunkText || "(none)",
+        inline: false,
+      });
+    });
+  }
+
   return embed;
 }
 
