@@ -3803,60 +3803,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-      // =========================
-      // Existing behavior: Submit + Snapshot + Recalc + Refresh DM
-      // =========================
-      await touchCommitment(commitment.id, {
-        [F.COM_STATUS]: "Submitted",
-        [F.COM_LAST_ACTION]: "Submitted cart",
-      });
-
-      await snapshotCountedQuantities(commitment.id);
-      await recalcOpportunityTotals(oppRecordId);
-      await syncPublic(oppRecordId);
-      await refreshDmPanel(oppRecordId, commitment.id);
-
-      await interaction.editReply("✅ Submitted!");
-      scheduleDeleteInteractionReply(interaction, 1500);
-      return;
-    } catch (err) {
-      console.error("cart_submit error:", err);
-
-      // ===== Rollback Remaining reservation if we already reserved but submit failed =====
-      // This prevents "ghost reserved stock" when Airtable update fails after reserving.
-      try {
-        // We can only rollback if we had a delta map reservation
-        if (typeof reserved !== "undefined" && reserved && reservedDeltaMap && reservedDeltaMap.size > 0) {
-          await withOppLock(oppRecordId, async () => {
-            const freshOpp = await oppsTable.find(oppRecordId);
-            const f = freshOpp.fields || {};
-            const remainingMap = quoteFieldToMap(f?.[F.OPP_REMAINING_QTY_JSON]);
-
-            // Undo reservation: add back same delta values
-            for (const [sizeKey, d] of reservedDeltaMap.entries()) {
-              const size = String(sizeKey);
-              const delta = Number(d) || 0;
-              if (delta === 0) continue;
-
-              const remNow = Number(remainingMap.get(size) ?? 0) || 0;
-              remainingMap.set(size, Math.max(0, Math.round(remNow + delta)));
-            }
-
-            await oppsTable.update(oppRecordId, {
-              [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(remainingMap),
-            });
-          });
-        }
-      } catch (e) {
-        console.warn("⚠️ Failed to rollback Remaining after cart_submit failure:", e?.message || e);
-      }
-
-      await interaction.editReply("⚠️ Could not submit. Try again.");
-      scheduleDeleteInteractionReply(interaction, 2500);
-      return;
-    }
-  }
-
   // Supplier Deny button
   if (interaction.isButton() && interaction.customId.startsWith(`${SKUREQ.DENY}:`)) {
     if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
@@ -3865,7 +3811,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     const bulkRequestRecordId = interaction.customId.split(":")[1];
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // 1) Find supplier record by Discord User ID
     const supplierDiscordId = interaction.user.id;
