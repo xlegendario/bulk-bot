@@ -2488,40 +2488,41 @@ async function safeDeferReply(interaction, options) {
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
 
-  // ✅ DO NOT auto-defer everything.
-  // Some buttons must use showModal() or deferUpdate(), and auto-defer would break them.
-  const cid = interaction.isButton() ? String(interaction.customId || "") : "";
+  // ✅ Auto-defer ONLY for buttons.
+  // Never auto-defer modal submits, select menus, etc.
+  if (interaction.isButton()) {
+    const cid = String(interaction.customId || "");
 
-  const skipAutoDefer =
-    interaction.isButton() &&
-    (
-      // Supplier draft quote editor uses deferUpdate()
-      cid.startsWith(`${SUPQ.EDIT}:`) ||
-      cid.startsWith(`${SUPQ.SIZE}:`) ||
-      cid.startsWith(`${SUPQ.CONFIRM}:`) ||
+    const skipAutoDefer =
+      (
+        // Supplier quote editor uses deferUpdate()
+        cid.startsWith(`${SUPQ.EDIT}:`) ||
+        cid.startsWith(`${SUPQ.SIZE}:`) ||
+        cid.startsWith(`${SUPQ.CONFIRM}:`) ||
 
-      // Anything that opens a modal must NOT be pre-deferred
-      cid === INITQ.BTN_BASIC ||
-      cid === INITQ.BTN_SPECIFIC ||
-      cid.startsWith(`${INITQ.BRAND}:`) ||
-      cid.startsWith(`${INITQ.STOCK_SIZE}:`) ||
-      cid.startsWith(`${INITQ.STOCK_CONFIRM}:`) ||
-      cid.startsWith(`${SKUREQ.QUOTE}:`) ||
-      cid === REQ.BTN_OPEN ||
-      cid.startsWith(`${FULLRUN.BTN}:`) ||
-      cid.startsWith("size_pick:") ||
-      // ✅ These handlers already call interaction.deferReply() themselves
-      cid.startsWith("opp_join:") ||
-      cid.startsWith("cart_addmore:") ||
-      cid.startsWith("cart_submit:") ||
-      cid.startsWith("cart_clear:")
-    );
+        // Anything that opens a modal must NOT be pre-deferred
+        cid === INITQ.BTN_BASIC ||
+        cid === INITQ.BTN_SPECIFIC ||
+        cid.startsWith(`${INITQ.BRAND}:`) ||
+        cid.startsWith(`${INITQ.STOCK_SIZE}:`) ||
+        cid.startsWith(`${INITQ.STOCK_CONFIRM}:`) ||
+        cid.startsWith(`${SKUREQ.QUOTE}:`) ||
+        cid === REQ.BTN_OPEN ||
+        cid.startsWith(`${FULLRUN.BTN}:`) ||
+        cid.startsWith("size_pick:") ||
 
-  if (!skipAutoDefer) {
-    const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!ok) return;
+        // These handlers already call deferReply themselves
+        cid.startsWith("opp_join:") ||
+        cid.startsWith("cart_addmore:") ||
+        cid.startsWith("cart_submit:") ||
+        cid.startsWith("cart_clear:")
+      );
+
+    if (!skipAutoDefer) {
+      const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+      if (!ok) return;
+    }
   }
-
 
   // =========================
   // SUPPLIER QUOTE: Edit / Confirm
