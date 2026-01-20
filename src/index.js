@@ -3485,8 +3485,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // Add More
   if (interaction.isButton() && interaction.customId.startsWith("cart_addmore:")) {
     const oppRecordId = interaction.customId.split("cart_addmore:")[1];
-    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!okDefer) return;
+    const okAddMore = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okAddMore) return;
 
 
     try {
@@ -3610,8 +3610,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const inGuild = !!interaction.guildId;
 
     // ✅ SAFELY acknowledge
-    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!okDefer) return;
+    const okClear = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okClear) return;
 
     try {
       const commitment = await findLatestCommitment(interaction.user.id, oppRecordId);
@@ -3645,8 +3645,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const inGuild = !!interaction.guildId;
 
     // ✅ SAFELY acknowledge (prevents InteractionNotReplied)
-    const okDefer = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
-    if (!okDefer) return;
+    const okSubmit = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+    if (!okSubmit) return;
 
     try {
       // Only in DMs (your existing behavior)
