@@ -8,6 +8,7 @@ import morgan from "morgan";
 import Airtable from "airtable";
 import {
   Client,
+  BaseInteraction,
   GatewayIntentBits,
   Partials,
   Events,
@@ -30,6 +31,9 @@ process.on("unhandledRejection", (err) => {
   console.error("Unhandled promise rejection:", err);
 });
 
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
 const NL = "\n";
 
 /* =========================
@@ -1035,6 +1039,58 @@ const client = new Client({
   ],
   partials: [Partials.Channel, Partials.Message],
 });
+
+client.on("error", (err) => {
+  console.error("Discord client error:", err);
+});
+
+
+/* =========================
+   GLOBAL AUTO-DELETE FOR INTERACTION REPLIES
+   (prevents clutter everywhere)
+========================= */
+
+const AUTO_DELETE_MS = 15000;
+
+function safeDeleteReply(interaction, ms = AUTO_DELETE_MS) {
+  setTimeout(() => {
+    interaction.deleteReply().catch(() => {});
+  }, ms);
+}
+
+function safeDeleteMessage(msg, ms = AUTO_DELETE_MS) {
+  setTimeout(() => msg.delete().catch(() => {}), ms);
+}
+
+// Patch interaction methods globally
+const _reply = BaseInteraction.prototype.reply;
+BaseInteraction.prototype.reply = async function (options) {
+  const res = await _reply.call(this, options);
+  safeDeleteReply(this, AUTO_DELETE_MS);
+  return res;
+};
+
+const _editReply = BaseInteraction.prototype.editReply;
+BaseInteraction.prototype.editReply = async function (options) {
+  const res = await _editReply.call(this, options);
+  safeDeleteReply(this, AUTO_DELETE_MS);
+  return res;
+};
+
+const _deferReply = BaseInteraction.prototype.deferReply;
+BaseInteraction.prototype.deferReply = async function (options) {
+  const res = await _deferReply.call(this, options);
+  // This will only delete if a reply actually exists later. Safe to call.
+  safeDeleteReply(this, AUTO_DELETE_MS);
+  return res;
+};
+
+const _followUp = BaseInteraction.prototype.followUp;
+BaseInteraction.prototype.followUp = async function (options) {
+  const msg = await _followUp.call(this, options);
+  safeDeleteMessage(msg, AUTO_DELETE_MS);
+  return msg;
+};
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
@@ -2352,8 +2408,28 @@ function buildBulkHistoryEmbed({ oppFields, currency }) {
    INTERACTIONS
 ========================= */
 
+async function safeDeferReply(interaction, options) {
+  try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply(options);
+    }
+    return true;
+  } catch (err) {
+    // DiscordAPIError 10062: Unknown interaction (expired / already acknowledged / too late)
+    const code = err?.code ?? err?.rawError?.code;
+    if (code === 10062) {
+      console.warn("⚠️ Interaction expired (10062). Skipping reply.");
+      return false;
+    }
+    throw err;
+  }
+}
+
+
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
+  const ok = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
+  if (!ok) return;
 
   // =========================
   // SUPPLIER QUOTE: Edit / Confirm
