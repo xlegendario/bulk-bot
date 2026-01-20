@@ -898,7 +898,29 @@ function scheduleDeleteInteractionReply(interaction, ms = 2000) {
   setTimeout(() => interaction.deleteReply().catch(() => {}), ms);
 }
 
+/* =========================
+   STOCK LOCK (per Opportunity)
+========================= */
 
+// In-process mutex so Remaining Quantity updates can't overlap.
+const oppLocks = new Map(); // oppId -> Promise
+
+async function withOppLock(oppRecordId, fn) {
+  const key = String(oppRecordId);
+  const prev = oppLocks.get(key) || Promise.resolve();
+
+  let release;
+  const next = new Promise((res) => (release = res));
+  oppLocks.set(key, prev.then(() => next));
+
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (oppLocks.get(key) === next) oppLocks.delete(key);
+  }
+}
 
 async function ensureRequestBulksMessage() {
   if (!DISCORD_REQUEST_BULKS_CHANNEL_ID) return;
@@ -1202,6 +1224,72 @@ async function getAllocatedTotalQty(commitmentRecordId) {
   }
   return total;
 }
+
+async function getCommitmentLineMaps(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  const qtyMap = new Map();      // size -> LINE_QTY
+  const countedMap = new Map();  // size -> LINE_COUNTED_QTY
+
+  for (const r of rows) {
+    const size = asText(r.fields?.[F.LINE_SIZE]).trim();
+    if (!size) continue;
+
+    const qty = Number(r.fields?.[F.LINE_QTY] ?? 0) || 0;
+    const counted = Number(r.fields?.[F.LINE_COUNTED_QTY] ?? 0) || 0;
+
+    if (qty > 0) qtyMap.set(size, qty);
+    if (counted > 0) countedMap.set(size, counted);
+  }
+
+  return { qtyMap, countedMap };
+}
+
+function calcDeltaMap(newMap, oldMap) {
+  const sizes = new Set([...newMap.keys(), ...oldMap.keys()]);
+  const delta = new Map();
+
+  for (const s of sizes) {
+    const a = Number(newMap.get(s) || 0);
+    const b = Number(oldMap.get(s) || 0);
+    const d = a - b;
+    if (d !== 0) delta.set(s, d);
+  }
+  return delta;
+}
+
+// If an Editing submit fails due to stock, rollback cart LINE_QTY back to last submitted snapshot (LINE_COUNTED_QTY).
+async function rollbackCartQtyToCounted(commitmentRecordId) {
+  const rows = await linesTable
+    .select({
+      filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(commitmentRecordId)}'`,
+      maxRecords: 200,
+    })
+    .firstPage();
+
+  const toUpdate = [];
+  const toDelete = [];
+
+  for (const r of rows) {
+    const counted = Number(r.fields?.[F.LINE_COUNTED_QTY] ?? 0) || 0;
+
+    if (counted <= 0) toDelete.push(r.id);
+    else toUpdate.push({ id: r.id, fields: { [F.LINE_QTY]: counted } });
+  }
+
+  for (let i = 0; i < toUpdate.length; i += 10) {
+    await linesTable.update(toUpdate.slice(i, i + 10));
+  }
+  for (let i = 0; i < toDelete.length; i += 10) {
+    await linesTable.destroy(toDelete.slice(i, i + 10));
+  }
+}
+
 
 async function snapshotCountedQuantities(commitmentRecordId) {
   const rows = await linesTable
@@ -3331,6 +3419,88 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const cartText = await getCartLinesText(commitment.id);
       if (cartText.includes("No sizes selected")) return void (await interaction.editReply("⚠️ Your cart is empty."));
+
+      // =========================
+      // STOCK-LIMITED BULKS: reserve Remaining Quantity atomically on Submit
+      // =========================
+      const opp = await oppsTable.find(oppRecordId);
+      const oppFields = opp.fields || {};
+
+      const remainingRaw = asText(oppFields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+      if (remainingRaw) {
+        // delta = (current cart qty) - (last submitted snapshot qty)
+        const { qtyMap, countedMap } = await getCommitmentLineMaps(commitment.id);
+        const deltaMap = calcDeltaMap(qtyMap, countedMap);
+
+        // Only touch Remaining if there is any change
+        if (deltaMap.size > 0) {
+          const reserveResult = await withOppLock(oppRecordId, async () => {
+            // Re-read inside lock (avoids race conditions)
+            const freshOpp = await oppsTable.find(oppRecordId);
+            const f = freshOpp.fields || {};
+
+            const remainingMap = quoteFieldToMap(f?.[F.OPP_REMAINING_QTY_JSON]);
+            const allowedMap = quoteFieldToMap(f?.[F.OPP_ALLOWED_QTY_JSON]); // optional cap
+
+            // Check only positive deltas (increases)
+            const insufficient = [];
+            for (const [sizeKey, d] of deltaMap.entries()) {
+              const delta = Number(d) || 0;
+              if (delta <= 0) continue;
+
+              const rem = Number(remainingMap.get(String(sizeKey)) ?? 0) || 0;
+              if (rem < delta) insufficient.push({ size: String(sizeKey), need: delta, remaining: rem });
+            }
+
+            if (insufficient.length) return { ok: false, insufficient };
+
+            // Apply deltas (positive => subtract, negative => add back)
+            for (const [sizeKey, d] of deltaMap.entries()) {
+              const size = String(sizeKey);
+              const delta = Number(d) || 0;
+              if (delta === 0) continue;
+
+              const remNow = Number(remainingMap.get(size) ?? 0) || 0;
+              let nextRem = remNow - delta;
+
+              // If Allowed exists, cap max to Allowed
+              if (allowedMap.size > 0) {
+                const cap = Number(allowedMap.get(size) ?? nextRem);
+                if (Number.isFinite(cap)) nextRem = Math.min(nextRem, cap);
+              }
+
+              remainingMap.set(size, Math.max(0, Math.round(nextRem)));
+            }
+
+            await oppsTable.update(oppRecordId, {
+              [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(remainingMap),
+            });
+
+            return { ok: true };
+          });
+
+          if (!reserveResult.ok) {
+            const lines = reserveResult.insufficient
+              .slice(0, 8)
+              .map((x) => `• **${x.size}**: need **${x.need}**, remaining **${x.remaining}**`)
+              .join(NL);
+
+            // If they were editing, rollback cart qty to last submitted snapshot so they aren't stuck
+            if (status === "Editing") {
+              await rollbackCartQtyToCounted(commitment.id);
+              await refreshDmPanel(oppRecordId, commitment.id);
+            }
+
+            await interaction.editReply(
+              `⚠️ Not enough stock to submit your latest changes.${NL}${NL}${lines}${NL}${NL}` +
+              (status === "Editing"
+                ? "I rolled your cart back to your last submitted quantities."
+                : "Please reduce quantities and try again.")
+            );
+            return;
+          }
+        }
+      }
 
       await touchCommitment(commitment.id, {
         [F.COM_STATUS]: "Submitted",
