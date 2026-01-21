@@ -4078,7 +4078,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
   }
-});
+}
 
 /* =========================
    EXPRESS API
