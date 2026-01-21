@@ -606,6 +606,34 @@ const BUYER_ONB = {
 // userId -> { oppId, countryName, fullName, companyName, vatId, email }
 const pendingBuyerOnboarding = new Map();
 
+const buyerCountryOptions = [
+  "Austria",
+  "Belgium",
+  "Bulgaria",
+  "Croatia",
+  "Cyprus",
+  "Czech Republic",
+  "Denmark",
+  "Finland",
+  "France",
+  "Germany",
+  "Greece",
+  "Hungary",
+  "Italy",
+  "Latvia",
+  "Luxembourg",
+  "Netherlands",
+  "Poland",
+  "Portugal",
+  "Romania",
+  "Slovakia",
+  "Slovenia",
+  "Spain",
+  "Sweden",
+  "Norway",
+  "Switzerland",
+];
+
 function toUnixSecondsFromAirtableDate(v) {
   const s = asText(v).trim();
   if (!s) return null;
