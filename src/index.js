@@ -1303,6 +1303,65 @@ async function upsertBuyer(discordUser) {
   });
 }
 
+async function startCartForUser(user, opportunityRecordId) {
+  // Ensure buyer exists (now should after onboarding, but safe)
+  const buyer = await upsertBuyer(user);
+
+  // Load opportunity
+  const opp = await oppsTable.find(opportunityRecordId);
+  const oppFields = opp.fields || {};
+
+  // Ensure open
+  const oppStatus = asText(oppFields[F.OPP_STATUS]) || "";
+  if (oppStatus && oppStatus !== "Open") {
+    const dm = await user.createDM();
+    await dm.send("⛔ This bulk is closed.");
+    return;
+  }
+
+  // Find/create commitment
+  let commitment = await findLatestCommitment(user.id, opportunityRecordId);
+  if (!commitment) {
+    commitment = await createCommitment({
+      oppRecordId: opportunityRecordId,
+      buyerRecordId: buyer.id,
+      discordId: user.id,
+      discordTag: user.tag,
+    });
+  }
+
+  const fresh = await commitmentsTable.find(commitment.id);
+  const status = asText(fresh.fields[F.COM_STATUS]) || "Draft";
+
+  const dm = await user.createDM();
+
+  const oppEmbed = await buildOpportunityEmbedWithLadder(opportunityRecordId, oppFields);
+  const linesText = await getCartLinesText(commitment.id);
+  const lastAction = asText(fresh.fields[F.COM_LAST_ACTION]);
+  const cartEmbed = buildCartEmbed(linesText, status, lastAction);
+
+  const sizes = await resolveAllowedSizesAndMaybeWriteback(opportunityRecordId, oppFields);
+  const components = sizes.length ? buildSizeButtons(opportunityRecordId, sizes, status) : [];
+
+  const dmChannelId = asText(fresh.fields[F.COM_DM_CHANNEL_ID]);
+  const dmMessageId = asText(fresh.fields[F.COM_DM_MESSAGE_ID]);
+
+  let panelMsg;
+  if (dmChannelId && dmMessageId) {
+    try {
+      const ch = await client.channels.fetch(dmChannelId);
+      panelMsg = await ch.messages.fetch(dmMessageId);
+      await panelMsg.edit({ embeds: [oppEmbed, cartEmbed], components: components.length ? components : [] });
+    } catch {
+      panelMsg = await dm.send({ embeds: [oppEmbed, cartEmbed], components: components.length ? components : undefined });
+    }
+  } else {
+    panelMsg = await dm.send({ embeds: [oppEmbed, cartEmbed], components: components.length ? components : undefined });
+  }
+
+  await updateCommitmentDM(commitment.id, dm.id, panelMsg.id);
+}
+
 async function findBuyerByDiscordId(discordId) {
   const rows = await buyersTable.select({
     maxRecords: 1,
@@ -2681,6 +2740,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       components: [row1, row2],
       flags: MessageFlags.Ephemeral,
     });
+
+    // ✅ DISABLE the message that had the Start buyer setup button
+    // (this handler is triggered by clicking the Start button, so interaction.message is that DM message)
+    try {
+      await interaction.message.edit({ components: [] });
+    } catch {}
+
     return;
   }
 
@@ -2700,6 +2766,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.isButton() && interaction.customId.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`)) {
     const oppId = interaction.customId.split(":")[1];
+
+    // ✅ Disable the country dropdown + Continue (Step 1/2) message so they can’t click again
+    try {
+      await interaction.message.edit({ components: [] });
+    } catch {}
+
     const pending = pendingBuyerOnboarding.get(interaction.user.id);
 
     if (!pending?.countryName) {
@@ -2786,6 +2858,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.isButton() && interaction.customId.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`)) {
     const oppId = interaction.customId.split(":")[1];
+    
+    // ✅ Disable the Continue to Address message so it can’t be clicked twice
+    try {
+      await interaction.message.edit({ components: [] });
+    } catch {}
+    
     const pending = pendingBuyerOnboarding.get(interaction.user.id);
 
     if (!pending?.fullName || !pending?.email || !pending?.countryName) {
