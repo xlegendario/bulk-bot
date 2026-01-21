@@ -2713,14 +2713,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // From here on, ONLY use followUp/editReply depending on what we used above.
     // We will send ONLY ONE ephemeral message and we will NOT delete it,
     // to avoid "Original message was deleted" clutter.
-    const ack = await interaction.followUp({
-      content: "✅ Creating stock setup…",
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => null);
+    // Ensure we have an ephemeral reply we can delete
+    try {
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      }
+    } catch {}
 
-    if (ack) {
-      scheduleDeleteMessage(ack, 3000);
-    }
+    // Use editReply so we can deleteReply reliably
+    await interaction.editReply("✅ Creating stock setup…").catch(() => {});
+    scheduleDeleteInteractionReply(interaction, 3000);
 
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
