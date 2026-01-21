@@ -654,6 +654,10 @@ function normalizeSku(s) {
   return String(s || "").trim().toLowerCase();
 }
 
+function flagsIfGuild(interaction) {
+  return interaction.guildId ? { flags: MessageFlags.Ephemeral } : {};
+}
+
 async function upsertBulkRequest({ skuRaw, qty, buyerTargetPrice }) {
   const skuNorm = normalizeSku(skuRaw);
   if (!skuNorm) throw new Error("SKU missing");
@@ -2738,15 +2742,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({
       content: "Step **1/2**: select your country, then click **Continue**.",
       components: [row1, row2],
-      flags: MessageFlags.Ephemeral,
+      ...flagsIfGuild(interaction),
     });
 
+
     // ✅ DISABLE the message that had the Start buyer setup button
-    // (this handler is triggered by clicking the Start button, so interaction.message is that DM message)
     try {
       await interaction.message.edit({ components: [] });
-    } catch {}
-
+    } catch (e) {
+      console.warn("Could not disable Start buyer setup message:", e?.message || e);
+    }
     return;
   }
 
@@ -2770,7 +2775,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ✅ Disable the country dropdown + Continue (Step 1/2) message so they can’t click again
     try {
       await interaction.message.edit({ components: [] });
-    } catch {}
+    } catch (e) {
+      console.warn("Could not disable Step 1/2 message:", e?.message || e);
+    }
+
 
     const pending = pendingBuyerOnboarding.get(interaction.user.id);
 
@@ -2851,7 +2859,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({
       content: "✅ Step 1/2 saved. Now continue to Step 2/2.",
       components: [row],
-      flags: MessageFlags.Ephemeral,
+      ...flagsIfGuild(interaction),
     });
     return;
   }
@@ -2862,8 +2870,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ✅ Disable the Continue to Address message so it can’t be clicked twice
     try {
       await interaction.message.edit({ components: [] });
-    } catch {}
-    
+    } catch (e) {
+      console.warn("Could not disable Step 2/2 message:", e?.message || e);
+    }
+
     const pending = pendingBuyerOnboarding.get(interaction.user.id);
 
     if (!pending?.fullName || !pending?.email || !pending?.countryName) {
