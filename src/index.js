@@ -2886,16 +2886,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Read modal inputs
-    const sku = interaction.fields.getTextInputValue(INITQ.SKU).trim();
-    const priceRaw = interaction.fields.getTextInputValue(INITQ.PRICE).trim();
-    const etaRaw = interaction.fields.getTextInputValue(INITQ.ETA).trim();
+    // ✅ Read modal inputs (Specific Final Modal uses FINAL_* ids)
+    const sku = interaction.fields.getTextInputValue(INITQ.FINAL_SKU)?.trim();
+    const supplierPrice = parseMoneyNumber(interaction.fields.getTextInputValue(INITQ.FINAL_PRICE));
+    const etaDays = Number.parseInt(interaction.fields.getTextInputValue(INITQ.FINAL_ETA), 10);
 
-    const supplierPrice = Number(priceRaw.replace(",", "."));
-    const etaDays = parseInt(etaRaw, 10);
-
-    if (!sku || !Number.isFinite(supplierPrice) || !Number.isFinite(etaDays)) {
-      await interaction.editReply("❌ Invalid input. Please check SKU, price and ETA.");
+    if (!sku) {
+      await interaction.editReply("❌ SKU required.");
+      return;
+    }
+    if (supplierPrice === null || !Number.isFinite(supplierPrice) || supplierPrice <= 0) {
+      await interaction.editReply("❌ Supplier Price must be a valid positive number.");
+      return;
+    }
+    if (!Number.isFinite(etaDays) || etaDays <= 0) {
+      await interaction.editReply("❌ ETA must be a positive number of business days.");
       return;
     }
 
