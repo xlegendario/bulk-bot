@@ -3190,8 +3190,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
     const c = await commitmentsTable.find(commitmentId);
     const depositPct = await getBuyerDepositPct(c.fields);
 
@@ -3235,8 +3233,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.reply({ content: "⛔ Staff only.", flags: MessageFlags.Ephemeral });
       return;
     }
-
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     await commitmentsTable.update(commitmentId, { [F.COM_STATUS]: "Paid" });
 
