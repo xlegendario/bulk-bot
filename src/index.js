@@ -1838,6 +1838,7 @@ function buildStockSetupEmbed({ brandLabel, skuPreview, qtyMap, ladder }) {
     "",
     "**Set quantity per size** by clicking a size button.",
     "",
+    "When all quantities are set, press **Confirm Stock**.",
     lines.length ? lines.join(NL) : "_No sizes set yet._",
   ]
     .filter(Boolean)
@@ -2659,53 +2660,61 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // =========================
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQ.BRAND}:`)) {
     if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral }).catch(() => {});
-      return;
-    }
-
-    const [, mode, presetId] = interaction.customId.split(":");
-
-    // ✅ ACK FAST (before any Airtable calls) to avoid Unknown interaction (10062)
-    if (mode === "specific" && interaction.message) {
-      try {
-        const disabled = interaction.message.components.map((row) => {
-          const r = ActionRowBuilder.from(row);
-          r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
-          return r;
-        });
-        await interaction.update({ components: disabled }); // ACKS the interaction
-      } catch {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    } else {
-      // basic (showModal) should NOT be deferred/updated here
-      // but if this branch happens we still ACK to be safe
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-
-    // Now do slow work (Airtable)
-    const preset = await getPresetById(presetId).catch(() => null);
-    if (!preset || !preset.ladder?.length) {
-      // If we ACKed via update, we can't reply; use followUp safely
-      await interaction.followUp({
-        content: "❌ Could not load that brand ladder.",
+      await interaction.reply({
+        content: "Not allowed here.",
         flags: MessageFlags.Ephemeral,
       }).catch(() => {});
       return;
     }
 
-    // BASIC -> open modal (SKU, Min, Max, Price, ETA) with presetId encoded
-    // IMPORTANT: showModal must be fast; we already loaded preset, so OK
+    const [, mode, presetId] = interaction.customId.split(":");
+
+    /* ======================================================
+       BASIC MODE → SHOW MODAL (NO defer / update beforehand)
+       ====================================================== */
     if (mode === "basic") {
+      const preset = await getPresetById(presetId).catch(() => null);
+      if (!preset || !preset.ladder?.length) {
+        await interaction.reply({
+          content: "❌ Could not load that brand ladder.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+        return;
+      }
+
       const modal = new ModalBuilder()
         .setCustomId(`${INITQ.BASIC_MODAL}:${presetId}`)
         .setTitle("Initiate Quote");
 
-      const sku = new TextInputBuilder().setCustomId(INITQ.SKU).setLabel("SKU").setStyle(TextInputStyle.Short).setRequired(true);
-      const min = new TextInputBuilder().setCustomId(INITQ.MIN).setLabel("Min Size").setStyle(TextInputStyle.Short).setRequired(true);
-      const max = new TextInputBuilder().setCustomId(INITQ.MAX).setLabel("Max Size").setStyle(TextInputStyle.Short).setRequired(true);
-      const price = new TextInputBuilder().setCustomId(INITQ.PRICE).setLabel("Supplier Price").setStyle(TextInputStyle.Short).setRequired(true);
-      const eta = new TextInputBuilder().setCustomId(INITQ.ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true);
+      const sku = new TextInputBuilder()
+        .setCustomId(INITQ.SKU)
+        .setLabel("SKU")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const min = new TextInputBuilder()
+        .setCustomId(INITQ.MIN)
+        .setLabel("Min Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const max = new TextInputBuilder()
+        .setCustomId(INITQ.MAX)
+        .setLabel("Max Size")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const price = new TextInputBuilder()
+        .setCustomId(INITQ.PRICE)
+        .setLabel("Supplier Price")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const eta = new TextInputBuilder()
+        .setCustomId(INITQ.ETA)
+        .setLabel("ETA (Business Days)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
 
       modal.addComponents(
         new ActionRowBuilder().addComponents(sku),
@@ -2715,40 +2724,77 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(eta)
       );
 
-      // For basic we should show the modal (no extra replies)
       await interaction.showModal(modal).catch(async () => {
-        await interaction.followUp({ content: "❌ Could not open modal. Try again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        await interaction.reply({
+          content: "❌ Could not open modal. Please try again.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
       });
+
       return;
     }
 
-    // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
+    /* ======================================================
+       SPECIFIC MODE → FAST ACK → CREATE STOCK SETUP
+       ====================================================== */
+
+    // ✅ FAST ACK (before Airtable)
+    if (interaction.message) {
+      try {
+        const disabled = interaction.message.components.map((row) => {
+          const r = ActionRowBuilder.from(row);
+          r.components = row.components.map((c) =>
+            ButtonBuilder.from(c).setDisabled(true)
+          );
+          return r;
+        });
+        await interaction.update({ components: disabled });
+      } catch {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    } else {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+
+    const preset = await getPresetById(presetId).catch(() => null);
+    if (!preset || !preset.ladder?.length) {
+      await interaction.followUp({
+        content: "❌ Could not load that brand ladder.",
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
+      return;
+    }
+
     if (!interaction.channel || !interaction.channel.isTextBased()) {
-      await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction.followUp({
+        content: "❌ This must be used inside a text channel.",
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
       return;
     }
 
-    // ✅ Anti-double-run guard to prevent duplicate stock setup embeds
+    // ✅ Anti-double-run guard
     if (!globalThis.__initqLocks) globalThis.__initqLocks = new Map();
     const lockKey = `${interaction.guildId}:${interaction.channelId}:${interaction.user.id}:${presetId}`;
     if (globalThis.__initqLocks.has(lockKey)) return;
     globalThis.__initqLocks.set(lockKey, Date.now());
-    setTimeout(() => {
-      try { globalThis.__initqLocks.delete(lockKey); } catch {}
-    }, 8000);
+    setTimeout(() => globalThis.__initqLocks.delete(lockKey), 8000);
 
-    const qtyMap = new Map(); // size -> qty
+    const qtyMap = new Map();
     for (const s of preset.ladder) qtyMap.set(s, 0);
 
-    const embed = buildStockSetupEmbed({ brandLabel: preset.label, skuPreview: "", qtyMap, ladder: preset.ladder });
+    const embed = buildStockSetupEmbed({
+      brandLabel: preset.label,
+      skuPreview: "",
+      qtyMap,
+      ladder: preset.ladder,
+    });
 
-    // Send message to channel so supplier can click size buttons
     const stockMsg = await interaction.channel.send({
       embeds: [embed],
       components: buildStockSizeRows("PENDING", preset.ladder),
     });
 
-    // Now that we have stockMsg.id, rebuild component IDs with that id
     await stockMsg.edit({
       components: buildStockSizeRows(stockMsg.id, preset.ladder),
     });
@@ -2760,12 +2806,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       qtyMap,
       createdBy: interaction.user.id,
     });
-
-    // One small ephemeral confirmation (no deletion, no clutter for channel)
-    await interaction.followUp({
-      content: "✅ Stock setup created. Set quantities and press **Confirm Stock**.",
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => {});
 
     return;
   }
