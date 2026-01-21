@@ -266,6 +266,11 @@ function formatEtaBusinessDays(v) {
   return `ETA: ${days} business day${days === 1 ? "" : "s"}`;
 }
 
+function scheduleDeleteMessage(msg, ms = 5000) {
+  if (!msg) return;
+  setTimeout(() => msg.delete().catch(() => {}), ms);
+}
+
 // Our quote storage format is JSON in long-text fields:
 // { "36": 7, "36.5": 3, ... }
 function quoteFieldToMap(fieldValue) {
@@ -2704,7 +2709,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // From here on, ONLY use followUp/editReply depending on what we used above.
     // To keep it simple: use followUp for everything in SPECIFIC.
-    await interaction.followUp({ content: "✅ Brand selected. Creating stock setup…", flags: MessageFlags.Ephemeral });
+    const m1 = await interaction.followUp({
+      content: "✅ Brand selected. Creating stock setup…",
+      flags: MessageFlags.Ephemeral,
+    });
+    scheduleDeleteMessage(m1, 3000);
 
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
@@ -2736,10 +2745,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       createdBy: interaction.user.id,
     });
 
-    await interaction.followUp({
+    const m2 = await interaction.followUp({
       content: `✅ Stock setup created in this channel. Fill quantities and click **Confirm Stock**.`,
       flags: MessageFlags.Ephemeral,
     });
+    scheduleDeleteMessage(m2, 5000);
 
     return;
   }
@@ -2853,83 +2863,94 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // =========================
+  // INITIATE QUOTE (Supplier): Final modal submit (Specific)
+  // =========================
   if (interaction.isModalSubmit() && interaction.customId.startsWith(`${INITQ.FINAL_MODAL}:`)) {
+    const [, stockMsgId] = interaction.customId.split(":");
+
+    // ACK immediately
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const stockMsgId = interaction.customId.split(":")[1];
-    const sess = initiateQuoteSessions.get(stockMsgId);
-
-    if (!sess) {
-      await interaction.editReply("❌ Stock session expired. Start again.");
-      return;
-    }
-    if (sess.createdBy && sess.createdBy !== interaction.user.id) {
-      await interaction.editReply("⛔ Only the supplier who started this can submit it.");
+    const session = initiateQuoteSessions.get(stockMsgId);
+    if (!session) {
+      await interaction.editReply("❌ This stock setup session expired or was already confirmed.");
       return;
     }
 
-    const sku = interaction.fields.getTextInputValue(INITQ.FINAL_SKU)?.trim();
-    const priceNum = parseMoneyNumber(interaction.fields.getTextInputValue(INITQ.FINAL_PRICE));
-    const etaNum = Number.parseInt(interaction.fields.getTextInputValue(INITQ.FINAL_ETA), 10);
+    const { presetId, brandLabel, ladder, qtyMap, createdBy } = session;
 
-    if (!sku) return void (await interaction.editReply("❌ SKU required."));
-    if (priceNum === null || !Number.isFinite(priceNum) || priceNum <= 0) {
-      await interaction.editReply("❌ Supplier Price must be a valid positive number.");
-      return;
-    }
-    if (!Number.isFinite(etaNum) || etaNum <= 0) {
-      await interaction.editReply("❌ ETA must be a positive number of business days.");
+    // Optional safety: only creator can submit
+    if (interaction.user.id !== createdBy) {
+      await interaction.editReply("❌ Only the supplier who started this stock setup can confirm it.");
       return;
     }
 
-    // Find supplier record by Discord User ID
-    const supplierRows = await suppliersTable
-      .select({
-        maxRecords: 1,
-        filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(interaction.user.id)}'`,
-      })
-      .firstPage();
+    // Read modal inputs
+    const sku = interaction.fields.getTextInputValue(INITQ.SKU).trim();
+    const priceRaw = interaction.fields.getTextInputValue(INITQ.PRICE).trim();
+    const etaRaw = interaction.fields.getTextInputValue(INITQ.ETA).trim();
 
-    if (!supplierRows.length) {
-      await interaction.editReply("❌ Supplier not found in Airtable (Suppliers table).");
+    const supplierPrice = Number(priceRaw.replace(",", "."));
+    const etaDays = parseInt(etaRaw, 10);
+
+    if (!sku || !Number.isFinite(supplierPrice) || !Number.isFinite(etaDays)) {
+      await interaction.editReply("❌ Invalid input. Please check SKU, price and ETA.");
       return;
     }
-    const supplierRecordId = supplierRows[0].id;
 
-    // Build Allowed/Remaining maps (only sizes with qty>0)
-    const allowedMap = new Map();
-    for (const s of sess.ladder) {
-      const q = Number(sess.qtyMap.get(s) || 0);
-      if (Number.isFinite(q) && q > 0) allowedMap.set(String(s), q);
+    // Build Allowed / Remaining JSON
+    const allowedQty = {};
+    let totalPairs = 0;
+
+    for (const [size, qty] of qtyMap.entries()) {
+      if (qty > 0) {
+        allowedQty[size] = qty;
+        totalPairs += qty;
+      }
     }
 
-    const allowedSizes = Array.from(allowedMap.keys());
-    // Derive min/max from ladder order
-    const minSize = allowedSizes.length ? allowedSizes[0] : "";
-    const maxSize = allowedSizes.length ? allowedSizes[allowedSizes.length - 1] : "";
+    if (!totalPairs) {
+      await interaction.editReply("❌ You must enter at least one pair.");
+      return;
+    }
 
-    const created = await oppsTable.create({
-      [F.OPP_STATUS]: "Draft",
-      [F.OPP_SKU_SOFT]: sku,
-      [F.OPP_MIN_SIZE]: minSize,
-      [F.OPP_MAX_SIZE]: maxSize,
-      [F.OPP_SUPPLIER_UNIT_PRICE]: priceNum,
-      [F.OPP_ETA_BUSINESS_DAYS]: etaNum,
-      [F.OPP_SUPPLIER_LINK]: [supplierRecordId],
-
-      // Buttons for buyers will use this field
-      [F.OPP_ALLOWED_SIZES]: allowedSizes.join(", "),
-
-      // Your new JSON fields
-      [F.OPP_ALLOWED_QTY_JSON]: mapToQuoteJson(allowedMap),
-      [F.OPP_REMAINING_QTY_JSON]: mapToQuoteJson(allowedMap),
+    // Create draft opportunity (your existing helper)
+    const oppRecordId = await createDraftOpportunitySpecific({
+      interaction,
+      presetId,
+      brandLabel,
+      sku,
+      supplierPrice,
+      etaDays,
+      allowedQty,
     });
 
-    // cleanup session
+    // Cleanup session
     initiateQuoteSessions.delete(stockMsgId);
 
-    await interaction.editReply(`✅ Draft Opportunity created: ${created.id} (admin can now fill tiers + post).`);
-    scheduleDeleteInteractionReply(interaction, 5000);
+    // 🧹 CLEAN UP stock setup message so channel stays clean
+    try {
+      if (interaction.channel && interaction.channel.isTextBased()) {
+        const stockMsg = await interaction.channel.messages
+          .fetch(stockMsgId)
+          .catch(() => null);
+
+        if (stockMsg) {
+          // Disable buttons immediately
+          await stockMsg.edit({ components: [] }).catch(() => {});
+
+          // Delete shortly after
+          setTimeout(() => {
+            stockMsg.delete().catch(() => {});
+          }, 2500);
+        }
+      }
+    } catch (e) {
+      console.warn("⚠️ Failed to clean up Stock Setup message:", e?.message || e);
+    }
+
+    await interaction.editReply(`✅ Quote created successfully (${totalPairs} pairs).`);
     return;
   }
 
