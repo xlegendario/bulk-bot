@@ -116,14 +116,14 @@ const F = {
   BUYER_DISCORD_ID: "Discord User ID",
   BUYER_DISCORD_USERNAME: "Discord Username",
   BUYER_DEFAULT_DEPOSIT_PCT: "Default Deposit %",
-  F.BUYER_FULL_NAME = "Full Name",
-  F.BUYER_COMPANY_NAME = "Company Name",
-  F.BUYER_VAT_ID = "VAT ID",
-  F.BUYER_EMAIL = "Email",
-  F.BUYER_ADDRESS = "Address",
-  F.BUYER_ZIPCODE = "Zipcode",
-  F.BUYER_CITY = "City",
-  F.BUYER_COUNTRY = "Country",
+  BUYER_FULL_NAME: "Full Name",
+  BUYER_COMPANY_NAME: "Company Name",
+  BUYER_VAT_ID: "VAT ID",
+  BUYER_EMAIL: "Email",
+  BUYER_ADDRESS: "Address",
+  BUYER_ZIPCODE: "Zipcode",
+  BUYER_CITY: "City",
+  BUYER_COUNTRY: "Country",
 
   // Opportunities
   OPP_PRODUCT_NAME: "Product Name",
@@ -1294,31 +1294,6 @@ function isBuyerProfileComplete(buyerRecord) {
   const country = String(f[F.BUYER_COUNTRY] || "").trim();
 
   return !!(fullName && email && address && zipcode && city && country);
-}
-
-async function upsertBuyerProfile({ user, countryName, fullName, companyName, vatId, email, address, zipcode, city }) {
-  const existing = await findBuyerByDiscordId(user.id);
-
-  const fields = {
-    [F.BUYER_DISCORD_ID]: user.id,
-    [F.BUYER_DISCORD_USERNAME]: user.username,
-
-    [F.BUYER_FULL_NAME]: fullName,
-    [F.BUYER_COMPANY_NAME]: companyName || "",
-    [F.BUYER_VAT_ID]: vatId || "",
-    [F.BUYER_EMAIL]: email,
-
-    [F.BUYER_ADDRESS]: address,
-    [F.BUYER_ZIPCODE]: zipcode,
-    [F.BUYER_CITY]: city,
-    [F.BUYER_COUNTRY]: countryName,
-  };
-
-  if (existing) {
-    await buyersTable.update(existing.id, fields);
-    return existing;
-  }
-  return await buyersTable.create(fields);
 }
 
 async function createCommitment({ oppRecordId, buyerRecordId, discordId, discordTag }) {
@@ -3849,15 +3824,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const okJoin = await safeDeferReply(interaction, deferEphemeralIfGuild(true));
     if (!okJoin) return;
 
-    const opportunityRecordId = interaction.customId.split("opp_join:")[1];
-
-    // ACK (your existing safeDefer)
-    const okJoin = await safeDeferReply(interaction, deferEphemeralIfGuild(true));
-    if (!okJoin) return;
-
-    // If no buyer record yet → start onboarding via DM
-    const buyerExisting = await findBuyerByDiscordId(interaction.user.id);
-    if (!buyerExisting) {
+    // ✅ Buyer profile gate: require FULL buyer info (not just a record)
+    const buyerRec = await findBuyerByDiscordId(interaction.user.id);
+    if (!isBuyerProfileComplete(buyerRec)) {
       const dm = await interaction.user.createDM();
 
       const embed = new EmbedBuilder()
@@ -3893,6 +3862,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      // Buyer exists + profile complete; safe to upsert username
       const buyer = await upsertBuyer(interaction.user);
 
       let commitment = await findLatestCommitment(interaction.user.id, opportunityRecordId);
