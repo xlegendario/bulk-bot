@@ -2741,21 +2741,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
      SPECIFIC MODE → REPLACE MESSAGE WITH STOCK SETUP
      ====================================================== */
 
-  if (!interaction.message) {
-    await interaction.reply({
-      content: "❌ This action must be used from the quote panel.",
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => {});
+  // SPECIFIC MODE → CREATE STOCK SETUP AS REAL CHANNEL MESSAGE (NOT EPHEMERAL)
+
+  // ACK the brand click by disabling buttons on the brand picker message (fast)
+  try {
+    const disabled = interaction.message.components.map((row) => {
+      const r = ActionRowBuilder.from(row);
+      r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
+      return r;
+    });
+    await interaction.update({ components: disabled }); // acknowledges interaction
+  } catch {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+
+  // Load preset
+  const preset = await getPresetById(presetId).catch(() => null);
+  if (!preset || !preset.ladder?.length) {
+    await interaction.followUp({ content: "❌ Could not load that brand ladder.", flags: MessageFlags.Ephemeral }).catch(() => {});
     return;
   }
 
-  // Fetch preset FIRST (still fast enough)
-  const preset = await getPresetById(presetId).catch(() => null);
-  if (!preset || !preset.ladder?.length) {
-    await interaction.reply({
-      content: "❌ Could not load that brand ladder.",
-      flags: MessageFlags.Ephemeral,
-    }).catch(() => {});
+  if (!interaction.channel || !interaction.channel.isTextBased()) {
+    await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
     return;
   }
 
@@ -2763,7 +2771,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const qtyMap = new Map();
   for (const s of preset.ladder) qtyMap.set(s, 0);
 
-  // Build stock setup embed
   const embed = buildStockSetupEmbed({
     brandLabel: preset.label,
     skuPreview: "",
@@ -2771,14 +2778,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     ladder: preset.ladder,
   });
 
-  // 🔑 REPLACE the brand picker message with stock setup
-  await interaction.update({
+  // ✅ Send a REAL channel message
+  const stockMsg = await interaction.channel.send({
     embeds: [embed],
-    components: buildStockSizeRows(interaction.message.id, preset.ladder),
+    components: buildStockSizeRows("PENDING", preset.ladder),
   });
 
-  // Register session ONCE using THIS message ID
-  initiateQuoteSessions.set(interaction.message.id, {
+  // Update buttons to include the correct messageId
+  await stockMsg.edit({
+    components: buildStockSizeRows(stockMsg.id, preset.ladder),
+  });
+
+  // Register session keyed by stockMsg.id
+  initiateQuoteSessions.set(stockMsg.id, {
     presetId,
     brandLabel: preset.label,
     ladder: preset.ladder,
