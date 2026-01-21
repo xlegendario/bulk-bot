@@ -1782,8 +1782,11 @@ function buildInitiateQuoteEmbed() {
       [
         "Use this panel to create a new **Draft Opportunity**.",
         "",
-        "• **Initiate Quote** → SKU + Min/Max + Price + ETA",
-        "• **Initiate Quote (Specific)** → set **qty per size** first (no overselling later)",
+        "• **Initiate Quote (General)**",
+        "Create a quote for a SKU where quantity is not limited. We will collect requests from buyers and see how many pairs we can sell.",
+        "",
+        "• **Initiate Quote (Specific Stock)**",
+        "Create a quote with exact size-by-size availability (for example: pairs you have in stock). The bot will prevent overselling.",
       ].join(NL)
     )
     .setColor(0xffd300);
@@ -2708,12 +2711,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // From here on, ONLY use followUp/editReply depending on what we used above.
-    // To keep it simple: use followUp for everything in SPECIFIC.
-    const m1 = await interaction.followUp({
-      content: "✅ Brand selected. Creating stock setup…",
+    // We will send ONLY ONE ephemeral message and we will NOT delete it,
+    // to avoid "Original message was deleted" clutter.
+    const ack = await interaction.followUp({
+      content: "✅ Creating stock setup…",
       flags: MessageFlags.Ephemeral,
-    });
-    scheduleDeleteMessage(m1, 3000);
+    }).catch(() => null);
 
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
@@ -2745,11 +2748,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       createdBy: interaction.user.id,
     });
 
-    const m2 = await interaction.followUp({
-      content: `✅ Stock setup created in this channel. Fill quantities and click **Confirm Stock**.`,
-      flags: MessageFlags.Ephemeral,
-    });
-    scheduleDeleteMessage(m2, 5000);
+    // Update the ONE ephemeral ack message (no new messages)
+    if (ack) {
+      await ack.edit({
+        content: `✅ Stock setup ready. Fill quantities and click **Confirm Stock**.`,
+      }).catch(() => {});
+    }
 
     return;
   }
