@@ -2787,6 +2787,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   });
 
   return;
+  } // ✅ CLOSE INITQ.BRAND HANDLER HERE
 
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQ.STOCK_SIZE}:`)) {
     const [, stockMsgId, encodedSize] = interaction.customId.split(":");
