@@ -147,6 +147,7 @@ const F = {
   OPP_ETA_BUSINESS_DAYS: "ETA (Business Days)",
   OPP_ALLOWED_QTY_JSON: "Allowed Quantity (JSON)",
   OPP_REMAINING_QTY_JSON: "Remaining Quantity (JSON)",
+  OPP_SUPPLIER_QUOTE_STATUS: "Supplier Quote Status",
 
 
   // New: supplier + final snapshot fields
@@ -3078,7 +3079,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Persist working quote while editing ✅
     const workingJson = mapToQuoteJson(workingMap);
-    await oppsTable.update(oppRecordId, { [F.OPP_SUPPLIER_QUOTE_WORKING]: workingJson });
+    await oppsTable.update(oppRecordId, {
+      [F.OPP_SUPPLIER_QUOTE_WORKING]: workingJson,
+      [F.OPP_SUPPLIER_QUOTE_STATUS]: "Editing",
+    });
 
     // Rebuild embed
     const supplierEmbed = buildSupplierDraftEmbed({
@@ -3158,6 +3162,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await oppsTable.update(oppRecordId, {
       [F.OPP_FINAL_QUOTE]: workingJson,
       [F.OPP_FINALIZED_AT]: finalizedAt,
+      [F.OPP_SUPPLIER_QUOTE_STATUS]: "Confirmed",
     });
 
     // 1) Allocate lines
@@ -4255,6 +4260,7 @@ async function closeOpportunityInternal(opportunityRecordId) {
   await oppsTable.update(opportunityRecordId, {
     [F.OPP_REQUESTED_QUOTE]: requestedJson,
     [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
+    [F.OPP_SUPPLIER_QUOTE_STATUS]: "Pending",
   });
 
   // Post supplier + admin draft quote messages (existing function in your script)
