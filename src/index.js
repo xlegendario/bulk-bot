@@ -1827,9 +1827,8 @@ function buildBrandRows(mode, presets) {
 }
 
 function buildStockSetupEmbed({ brandLabel, skuPreview, qtyMap, ladder }) {
-  // Show current filled sizes (qty>0)
   const lines = ladder
-    .filter((s) => (Number(qtyMap.get(s) || 0) || 0) > 0)
+    .filter((s) => Number(qtyMap.get(s) || 0) > 0)
     .map((s) => `• **${s}** × **${Number(qtyMap.get(s))}**`);
 
   const desc = [
@@ -1839,12 +1838,16 @@ function buildStockSetupEmbed({ brandLabel, skuPreview, qtyMap, ladder }) {
     "**Set quantity per size** by clicking a size button.",
     "",
     "When all quantities are set, press **Confirm Stock**.",
-    lines.length ? lines.join(NL) : "_No sizes set yet._",
+    "",
+    lines.length ? lines.join("\n") : "_No sizes set yet._",
   ]
     .filter(Boolean)
-    .join(NL);
+    .join("\n\n"); // 👈 this is the key
 
-  return new EmbedBuilder().setTitle("📦 Stock Setup (Specific)").setDescription(desc).setColor(0xffd300);
+  return new EmbedBuilder()
+    .setTitle("📦 Stock Setup (Specific)")
+    .setDescription(desc)
+    .setColor(0xffd300);
 }
 
 function buildStockSizeRows(stockMsgId, ladder) {
