@@ -2904,7 +2904,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Build Allowed / Remaining JSON
+    // Build Allowed / Remaining JSON from qtyMap
     const allowedQty = {};
     let totalPairs = 0;
 
@@ -2920,15 +2920,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Create draft opportunity (your existing helper)
-    const oppRecordId = await createDraftOpportunitySpecific({
-      interaction,
-      presetId,
-      brandLabel,
-      sku,
-      supplierPrice,
-      etaDays,
-      allowedQty,
+    // Determine min/max from sizes that have qty > 0
+    const allowedSizesArr = Object.keys(allowedQty).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
+    );
+    const minSize = allowedSizesArr[0];
+    const maxSize = allowedSizesArr[allowedSizesArr.length - 1];
+
+    // Find supplier record by Discord User ID (same as BASIC modal handler)
+    const supplierRows = await suppliersTable
+      .select({
+        maxRecords: 1,
+        filterByFormula: `{${F.SUP_DISCORD_USER_ID}}='${escapeForFormula(interaction.user.id)}'`,
+      })
+      .firstPage();
+
+    if (!supplierRows.length) {
+      await interaction.editReply("❌ Supplier not found in Airtable (Suppliers table).");
+      return;
+    }
+    const supplierRecordId = supplierRows[0].id;
+
+    // Create draft opportunity (Specific = stock-limited fields)
+    const created = await oppsTable.create({
+      [F.OPP_STATUS]: "Draft",
+      [F.OPP_SKU_SOFT]: sku,
+      [F.OPP_MIN_SIZE]: minSize,
+      [F.OPP_MAX_SIZE]: maxSize,
+      [F.OPP_SUPPLIER_UNIT_PRICE]: supplierPrice,
+      [F.OPP_ETA_BUSINESS_DAYS]: etaDays,
+      [F.OPP_SUPPLIER_LINK]: [supplierRecordId],
+
+      // Stock-limited markers
+      [F.OPP_ALLOWED_QTY_JSON]: JSON.stringify(allowedQty),
+      [F.OPP_REMAINING_QTY_JSON]: JSON.stringify(allowedQty),
+      [F.OPP_ALLOWED_SIZES]: allowedSizesArr.join(", "),
     });
 
     // Cleanup session
@@ -2937,25 +2963,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // 🧹 CLEAN UP stock setup message so channel stays clean
     try {
       if (interaction.channel && interaction.channel.isTextBased()) {
-        const stockMsg = await interaction.channel.messages
-          .fetch(stockMsgId)
-          .catch(() => null);
-
+        const stockMsg = await interaction.channel.messages.fetch(stockMsgId).catch(() => null);
         if (stockMsg) {
-          // Disable buttons immediately
           await stockMsg.edit({ components: [] }).catch(() => {});
-
-          // Delete shortly after
-          setTimeout(() => {
-            stockMsg.delete().catch(() => {});
-          }, 2500);
+          setTimeout(() => stockMsg.delete().catch(() => {}), 2500);
         }
       }
     } catch (e) {
       console.warn("⚠️ Failed to clean up Stock Setup message:", e?.message || e);
     }
 
-    await interaction.editReply(`✅ Quote created successfully (${totalPairs} pairs).`);
+    await interaction.editReply(`✅ Draft Opportunity created: **${created.id}** (${totalPairs} pairs).`);
+    scheduleDeleteInteractionReply(interaction, 5000);
     return;
   }
 
