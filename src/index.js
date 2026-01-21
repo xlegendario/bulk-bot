@@ -2654,21 +2654,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
+  // =========================
+  // INITIATE QUOTE (Supplier): Brand selected
+  // =========================
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQ.BRAND}:`)) {
     if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
 
     const [, mode, presetId] = interaction.customId.split(":");
 
+    // ✅ ACK FAST (before any Airtable calls) to avoid Unknown interaction (10062)
+    if (mode === "specific" && interaction.message) {
+      try {
+        const disabled = interaction.message.components.map((row) => {
+          const r = ActionRowBuilder.from(row);
+          r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
+          return r;
+        });
+        await interaction.update({ components: disabled }); // ACKS the interaction
+      } catch {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    } else {
+      // basic (showModal) should NOT be deferred/updated here
+      // but if this branch happens we still ACK to be safe
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+
+    // Now do slow work (Airtable)
     const preset = await getPresetById(presetId).catch(() => null);
-    if (!preset || !preset.ladder.length) {
-      await interaction.reply({ content: "❌ Could not load that brand ladder.", flags: MessageFlags.Ephemeral });
+    if (!preset || !preset.ladder?.length) {
+      // If we ACKed via update, we can't reply; use followUp safely
+      await interaction.followUp({
+        content: "❌ Could not load that brand ladder.",
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
       return;
     }
 
     // BASIC -> open modal (SKU, Min, Max, Price, ETA) with presetId encoded
+    // IMPORTANT: showModal must be fast; we already loaded preset, so OK
     if (mode === "basic") {
       const modal = new ModalBuilder()
         .setCustomId(`${INITQ.BASIC_MODAL}:${presetId}`)
@@ -2688,47 +2715,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ActionRowBuilder().addComponents(eta)
       );
 
-      await interaction.showModal(modal);
+      // For basic we should show the modal (no extra replies)
+      await interaction.showModal(modal).catch(async () => {
+        await interaction.followUp({ content: "❌ Could not open modal. Try again.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      });
       return;
     }
-
-    // If SPECIFIC, disable the brand buttons on the picker message immediately
-    if (mode === "specific" && interaction.message) {
-      try {
-        const disabled = interaction.message.components.map((row) => {
-          const r = ActionRowBuilder.from(row);
-          r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
-          return r;
-        });
-        await interaction.update({ components: disabled }); // ACKS interaction
-      } catch {
-        // If update fails for any reason, at least ACK the interaction so it doesn't error
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-      }
-    } else {
-      // No message to update, just ACK so we can send followUps
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
-    }
-
-    // From here on, ONLY use followUp/editReply depending on what we used above.
-    // We will send ONLY ONE ephemeral message and we will NOT delete it,
-    // to avoid "Original message was deleted" clutter.
-    // Ensure we have an ephemeral reply we can delete
-    try {
-      if (!interaction.deferred && !interaction.replied) {
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      }
-    } catch {}
-
-    // Use editReply so we can deleteReply reliably
-    await interaction.editReply("✅ Creating stock setup…").catch(() => {});
-    scheduleDeleteInteractionReply(interaction, 3000);
 
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
-      await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral });
+      await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
     }
+
+    // ✅ Anti-double-run guard to prevent duplicate stock setup embeds
+    if (!globalThis.__initqLocks) globalThis.__initqLocks = new Map();
+    const lockKey = `${interaction.guildId}:${interaction.channelId}:${interaction.user.id}:${presetId}`;
+    if (globalThis.__initqLocks.has(lockKey)) return;
+    globalThis.__initqLocks.set(lockKey, Date.now());
+    setTimeout(() => {
+      try { globalThis.__initqLocks.delete(lockKey); } catch {}
+    }, 8000);
 
     const qtyMap = new Map(); // size -> qty
     for (const s of preset.ladder) qtyMap.set(s, 0);
@@ -2754,12 +2761,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       createdBy: interaction.user.id,
     });
 
-    // Update the ONE ephemeral ack message (no new messages)
-    if (ack) {
-      await ack.edit({
-        content: `✅ Stock setup ready. Fill quantities and click **Confirm Stock**.`,
-      }).catch(() => {});
-    }
+    // One small ephemeral confirmation (no deletion, no clutter for channel)
+    await interaction.followUp({
+      content: "✅ Stock setup created. Set quantities and press **Confirm Stock**.",
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
 
     return;
   }
