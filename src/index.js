@@ -2718,6 +2718,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       flags: MessageFlags.Ephemeral,
     }).catch(() => null);
 
+    if (ack) {
+      scheduleDeleteMessage(ack, 3000);
+    }
+
     // SPECIFIC -> create a stock setup message in the channel (not ephemeral)
     if (!interaction.channel || !interaction.channel.isTextBased()) {
       await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral });
@@ -4033,6 +4037,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch {}
 
       await interaction.editReply("✅ Quote submitted.");
+      scheduleDeleteInteractionReply(interaction, 4000);
       return;
     } catch (err) {
       console.error("SKUREQ.MODAL failed:", err);
