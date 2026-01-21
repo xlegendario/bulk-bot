@@ -2552,6 +2552,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const opp = await oppsTable.find(oppRecordId);
     const oppFields = opp.fields || {};
 
+    // ✅ INSERT THIS RIGHT HERE (after oppFields is available)
+    try {
+      const current = String(oppFields[F.OPP_SUPPLIER_QUOTE_STATUS] || "").trim();
+
+      // Optional: don't downgrade if already Confirmed
+      if (current !== "Confirmed") {
+        await oppsTable.update(oppRecordId, {
+          [F.OPP_SUPPLIER_QUOTE_STATUS]: "Editing",
+        });
+      }
+    } catch (e) {
+      console.warn("⚠️ Could not set Supplier Quote Status=Editing:", e?.message || e);
+    }
+    // ✅ END INSERT
+
     const requestedMap = quoteFieldToMap(oppFields[F.OPP_REQUESTED_QUOTE]);
     const workingMap = quoteFieldToMap(oppFields[F.OPP_SUPPLIER_QUOTE_WORKING]);
 
