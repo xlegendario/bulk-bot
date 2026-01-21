@@ -2617,7 +2617,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         cid.startsWith(`${BUYER_ONB.BTN_START}:`) ||
         cid.startsWith(`${BUYER_ONB.COUNTRY_SELECT}:`) || // (select menus aren’t buttons, but fine)
         cid.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`) ||
-        cid.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`) ||
+        cid.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`)
       );
 
     if (!skipAutoDefer) {
