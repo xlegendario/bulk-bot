@@ -19,6 +19,7 @@ import {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  StringSelectMenuBuilder, // ✅ ADD THIS
   MessageFlags,
   ChannelType,
   PermissionsBitField,
