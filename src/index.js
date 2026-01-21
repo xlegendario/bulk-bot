@@ -116,6 +116,14 @@ const F = {
   BUYER_DISCORD_ID: "Discord User ID",
   BUYER_DISCORD_USERNAME: "Discord Username",
   BUYER_DEFAULT_DEPOSIT_PCT: "Default Deposit %",
+  F.BUYER_FULL_NAME = "Full Name",
+  F.BUYER_COMPANY_NAME = "Company Name",
+  F.BUYER_VAT_ID = "VAT ID",
+  F.BUYER_EMAIL = "Email",
+  F.BUYER_ADDRESS = "Address",
+  F.BUYER_ZIPCODE = "Zipcode",
+  F.BUYER_CITY = "City",
+  F.BUYER_COUNTRY = "Country",
 
   // Opportunities
   OPP_PRODUCT_NAME: "Product Name",
@@ -577,6 +585,25 @@ const INITQ = {
   FINAL_ETA: "initq_final_eta",
 };
 
+const BUYER_ONB = {
+  BTN_START: "buyer_onb_start",            // buyer_onb_start:<oppId>
+  COUNTRY_SELECT: "buyer_onb_country",     // buyer_onb_country:<oppId>
+  CONTINUE_ADDR: "buyer_onb_continue",     // buyer_onb_continue:<oppId>
+  MODAL_CONTACT: "buyer_onb_contact",      // buyer_onb_contact:<oppId>
+  MODAL_ADDRESS: "buyer_onb_address",      // buyer_onb_address:<oppId>
+
+  FULL_NAME: "buyer_full_name",
+  COMPANY: "buyer_company",
+  VAT: "buyer_vat",
+  EMAIL: "buyer_email",
+
+  ADDRESS: "buyer_address",
+  ZIP: "buyer_zip",
+  CITY: "buyer_city",
+};
+
+// userId -> { oppId, countryName, fullName, companyName, vatId, email }
+const pendingBuyerOnboarding = new Map();
 
 function toUnixSecondsFromAirtableDate(v) {
   const s = asText(v).trim();
@@ -1200,6 +1227,29 @@ function isStaffMember(member) {
    AIRTABLE: BUYERS / COMMITMENTS / LINES
 ========================= */
 
+async function upsertBuyerProfile({ user, countryName, fullName, companyName, vatId, email, address, zipcode, city }) {
+  const existing = await findBuyerByDiscordId(user.id);
+
+  const fields = {
+    [F.BUYER_DISCORD_ID]: user.id,
+    [F.BUYER_DISCORD_USERNAME]: user.username,
+    [F.BUYER_FULL_NAME]: fullName,
+    [F.BUYER_COMPANY_NAME]: companyName || "",
+    [F.BUYER_VAT_ID]: vatId || "",
+    [F.BUYER_EMAIL]: email,
+    [F.BUYER_ADDRESS]: address,
+    [F.BUYER_ZIPCODE]: zipcode,
+    [F.BUYER_CITY]: city,
+    [F.BUYER_COUNTRY]: countryName,
+  };
+
+  if (existing) {
+    await buyersTable.update(existing.id, fields);
+    return existing;
+  }
+  return await buyersTable.create(fields);
+}
+
 async function upsertBuyer(discordUser) {
   const discordId = discordUser.id;
   const username = discordUser.username;
@@ -1222,6 +1272,53 @@ async function upsertBuyer(discordUser) {
     [F.BUYER_DISCORD_ID]: discordId,
     [F.BUYER_DISCORD_USERNAME]: username,
   });
+}
+
+async function findBuyerByDiscordId(discordId) {
+  const rows = await buyersTable.select({
+    maxRecords: 1,
+    filterByFormula: `{${F.BUYER_DISCORD_ID}}='${escapeForFormula(discordId)}'`,
+  }).firstPage();
+  return rows.length ? rows[0] : null;
+}
+
+function isBuyerProfileComplete(buyerRecord) {
+  if (!buyerRecord) return false;
+  const f = buyerRecord.fields || {};
+
+  const fullName = String(f[F.BUYER_FULL_NAME] || "").trim();
+  const email = String(f[F.BUYER_EMAIL] || "").trim();
+  const address = String(f[F.BUYER_ADDRESS] || "").trim();
+  const zipcode = String(f[F.BUYER_ZIPCODE] || "").trim();
+  const city = String(f[F.BUYER_CITY] || "").trim();
+  const country = String(f[F.BUYER_COUNTRY] || "").trim();
+
+  return !!(fullName && email && address && zipcode && city && country);
+}
+
+async function upsertBuyerProfile({ user, countryName, fullName, companyName, vatId, email, address, zipcode, city }) {
+  const existing = await findBuyerByDiscordId(user.id);
+
+  const fields = {
+    [F.BUYER_DISCORD_ID]: user.id,
+    [F.BUYER_DISCORD_USERNAME]: user.username,
+
+    [F.BUYER_FULL_NAME]: fullName,
+    [F.BUYER_COMPANY_NAME]: companyName || "",
+    [F.BUYER_VAT_ID]: vatId || "",
+    [F.BUYER_EMAIL]: email,
+
+    [F.BUYER_ADDRESS]: address,
+    [F.BUYER_ZIPCODE]: zipcode,
+    [F.BUYER_CITY]: city,
+    [F.BUYER_COUNTRY]: countryName,
+  };
+
+  if (existing) {
+    await buyersTable.update(existing.id, fields);
+    return existing;
+  }
+  return await buyersTable.create(fields);
 }
 
 async function createCommitment({ oppRecordId, buyerRecordId, discordId, discordTag }) {
@@ -2540,7 +2637,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         cid.startsWith("opp_join:") ||
         cid.startsWith("cart_addmore:") ||
         cid.startsWith("cart_submit:") ||
-        cid.startsWith("cart_clear:")
+        cid.startsWith("cart_clear:") ||
+        // These handlers are for the buyer profile
+        cid.startsWith(`${BUYER_ONB.BTN_START}:`) ||
+        cid.startsWith(`${BUYER_ONB.COUNTRY_SELECT}:`) || // (select menus aren’t buttons, but fine)
+        cid.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`) ||
+        cid.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`) ||
       );
 
     if (!skipAutoDefer) {
@@ -2548,6 +2650,215 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!okAuto) return;
     }
   }
+
+  // =========================
+  // Create Buyer Profile on first "Join Bulk"
+  // =========================
+
+  if (interaction.isButton() && interaction.customId.startsWith(`${BUYER_ONB.BTN_START}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+
+    const select = new StringSelectMenuBuilder()
+      .setCustomId(`${BUYER_ONB.COUNTRY_SELECT}:${oppId}`)
+      .setPlaceholder("Select your country")
+      .addOptions(buyerCountryOptions.map((name) => ({ label: name, value: name })));
+
+    const row1 = new ActionRowBuilder().addComponents(select);
+
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${BUYER_ONB.MODAL_CONTACT}:${oppId}`)
+        .setLabel("Continue (Step 1/2)")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await interaction.reply({
+      content: "Step **1/2**: select your country, then click **Continue**.",
+      components: [row1, row2],
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith(`${BUYER_ONB.COUNTRY_SELECT}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+    const countryName = interaction.values?.[0];
+
+    pendingBuyerOnboarding.set(interaction.user.id, {
+      ...(pendingBuyerOnboarding.get(interaction.user.id) || {}),
+      oppId,
+      countryName,
+    });
+
+    await interaction.deferUpdate();
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+    const pending = pendingBuyerOnboarding.get(interaction.user.id);
+
+    if (!pending?.countryName) {
+      await interaction.reply({ content: "⚠️ Please select your country first.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`${BUYER_ONB.MODAL_CONTACT}:${oppId}`)
+      .setTitle("Buyer Setup — Step 1/2");
+
+    const fullName = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.FULL_NAME)
+      .setLabel("Full Name")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const company = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.COMPANY)
+      .setLabel("Company Name (optional)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false);
+
+    const vat = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.VAT)
+      .setLabel("VAT ID (optional)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(false);
+
+    const email = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.EMAIL)
+      .setLabel("Email")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(fullName),
+      new ActionRowBuilder().addComponents(company),
+      new ActionRowBuilder().addComponents(vat),
+      new ActionRowBuilder().addComponents(email)
+    );
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+    const pending = pendingBuyerOnboarding.get(interaction.user.id);
+
+    if (!pending?.countryName) {
+      await interaction.reply({ content: "⚠️ Country missing. Start again.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const fullName = interaction.fields.getTextInputValue(BUYER_ONB.FULL_NAME).trim();
+    const companyName = interaction.fields.getTextInputValue(BUYER_ONB.COMPANY) || "";
+    const vatId = interaction.fields.getTextInputValue(BUYER_ONB.VAT) || "";
+    const email = interaction.fields.getTextInputValue(BUYER_ONB.EMAIL).trim();
+
+    pendingBuyerOnboarding.set(interaction.user.id, {
+      ...pending,
+      oppId,
+      fullName,
+      companyName,
+      vatId,
+      email,
+    });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${BUYER_ONB.CONTINUE_ADDR}:${oppId}`)
+        .setLabel("Continue to Address (Step 2/2)")
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await interaction.reply({
+      content: "✅ Step 1/2 saved. Now continue to Step 2/2.",
+      components: [row],
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+    const pending = pendingBuyerOnboarding.get(interaction.user.id);
+
+    if (!pending?.fullName || !pending?.email || !pending?.countryName) {
+      await interaction.reply({ content: "⚠️ Step 1 is missing. Start again.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`${BUYER_ONB.MODAL_ADDRESS}:${oppId}`)
+      .setTitle("Buyer Setup — Step 2/2");
+
+    const address = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.ADDRESS)
+      .setLabel("Address")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const zip = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.ZIP)
+      .setLabel("Zipcode")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const city = new TextInputBuilder()
+      .setCustomId(BUYER_ONB.CITY)
+      .setLabel("City")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(address),
+      new ActionRowBuilder().addComponents(zip),
+      new ActionRowBuilder().addComponents(city)
+    );
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${BUYER_ONB.MODAL_ADDRESS}:`)) {
+    const oppId = interaction.customId.split(":")[1];
+    const pending = pendingBuyerOnboarding.get(interaction.user.id);
+
+    if (!pending?.fullName || !pending?.email || !pending?.countryName) {
+      await interaction.reply({ content: "⚠️ Missing Step 1 data. Start again.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const address = interaction.fields.getTextInputValue(BUYER_ONB.ADDRESS).trim();
+    const zipcode = interaction.fields.getTextInputValue(BUYER_ONB.ZIP).trim();
+    const city = interaction.fields.getTextInputValue(BUYER_ONB.CITY).trim();
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Save to Airtable
+    await upsertBuyerProfile({
+      user: interaction.user,
+      countryName: pending.countryName,
+      fullName: pending.fullName,
+      companyName: pending.companyName || "",
+      vatId: pending.vatId || "",
+      email: pending.email,
+      address,
+      zipcode,
+      city,
+    });
+  
+    pendingBuyerOnboarding.delete(interaction.user.id);
+
+    await interaction.editReply("✅ Buyer info saved. Opening your cart now…");
+
+    // ✅ Continue automatically into cart
+    await startCartForUser(interaction.user, oppId);
+
+    return;
+  }
+
 
   // =========================
   // SUPPLIER QUOTE: Edit / Confirm
@@ -3537,6 +3848,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ✅ Only defer ONCE. This click happens in the server, so inGuild = true.
     const okJoin = await safeDeferReply(interaction, deferEphemeralIfGuild(true));
     if (!okJoin) return;
+
+    const opportunityRecordId = interaction.customId.split("opp_join:")[1];
+
+    // ACK (your existing safeDefer)
+    const okJoin = await safeDeferReply(interaction, deferEphemeralIfGuild(true));
+    if (!okJoin) return;
+
+    // If no buyer record yet → start onboarding via DM
+    const buyerExisting = await findBuyerByDiscordId(interaction.user.id);
+    if (!buyerExisting) {
+      const dm = await interaction.user.createDM();
+
+      const embed = new EmbedBuilder()
+        .setTitle("🧾 Buyer info required")
+        .setDescription(
+          [
+            "Before you can join a bulk, we need your buyer details (for invoicing / shipping).",
+            "",
+            "Click the button below to start.",
+          ].join("\n")
+        )
+        .setColor(0xffd300);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${BUYER_ONB.BTN_START}:${opportunityRecordId}`)
+          .setLabel("Start buyer setup")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await dm.send({ embeds: [embed], components: [row] }).catch(() => {});
+      await interaction.editReply("✅ Check your DMs to complete buyer info, then we’ll open your cart automatically.");
+      return;
+    }
 
     try {
       const opp = await oppsTable.find(opportunityRecordId);
