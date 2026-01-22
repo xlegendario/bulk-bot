@@ -157,6 +157,8 @@ const F = {
   OPP_ALLOWED_QTY_JSON: "Allowed Quantity (JSON)",
   OPP_REMAINING_QTY_JSON: "Remaining Quantity (JSON)",
   OPP_SUPPLIER_QUOTE_STATUS: "Supplier Quote Status",
+  OPP_CLOSE_WARN_MSG_ID: "Close Warning Message ID",
+  OPP_CLOSE_WARN_STAGE: "Close Warning Last Stage",
 
 
   // New: supplier + final snapshot fields
@@ -181,6 +183,9 @@ const F = {
   COM_DEAL_MESSAGE_ID: "Discord Deal Message ID",
   COM_FINAL_UNIT_PRICE: "Final Unit Price", // currency field on Commitments
   COM_DEPOSIT_PCT: "Deposit %",
+  COM_REMINDER_STATE_JSON: "Reminder State (JSON)",
+  COM_REMINDER_DM_MSG_ID: "Reminder DM Message ID",
+  COM_REMINDER_DEAL_MSG_ID: "Reminder Deal Message ID",
 
   // Lines
   LINE_COMMITMENT: "Commitment",
@@ -239,6 +244,154 @@ const HARD_LOCKED_STATUSES = new Set(["Locked", "Deposit Paid", "Paid", "Cancell
 
 // We do NOT count Editing anymore. We count only the last submitted snapshot via Counted Quantity.
 const COUNTED_STATUSES = new Set(["Submitted", "Locked", "Deposit Paid", "Paid"]);
+
+/* =========================
+   REMINDERS: STATE + HELPERS
+========================= */
+
+// Parse Reminder State (JSON) from Airtable
+function getReminderState(commitmentFields) {
+  const raw = asText(commitmentFields?.[F.COM_REMINDER_STATE_JSON]).trim();
+  const parsed = raw ? safeJsonParse(raw) : null;
+  return parsed && typeof parsed === "object" ? parsed : {};
+}
+
+function setReminderStatePatch(stateObj) {
+  return { [F.COM_REMINDER_STATE_JSON]: JSON.stringify(stateObj || {}) };
+}
+
+function isoNow() {
+  return new Date().toISOString();
+}
+
+function msUntil(unixSeconds) {
+  if (!unixSeconds) return null;
+  return unixSeconds * 1000 - Date.now();
+}
+
+function minutes(n) {
+  return n * 60 * 1000;
+}
+
+// Discord link to the buyer’s cart panel in DMs
+function makeDmPanelLink(dmChannelId, dmMessageId) {
+  if (!dmChannelId || !dmMessageId) return null;
+  return `https://discord.com/channels/@me/${dmChannelId}/${dmMessageId}`;
+}
+
+// Safe delete a specific message id in a channel (ignore missing perms / missing msg)
+async function tryDeleteMessage(channel, messageId) {
+  if (!channel || !channel.isTextBased?.() || !messageId) return;
+  try {
+    const m = await channel.messages.fetch(String(messageId));
+    await m.delete().catch(() => {});
+  } catch (_) {}
+}
+
+/**
+ * Send a DM reminder for a commitment, but keep ONLY ONE reminder message per opportunity:
+ * - deletes old reminder message (if stored)
+ * - posts new reminder
+ * - stores new reminder msg id + state JSON
+ */
+async function sendOrReplaceCommitmentReminderDM({ commitmentRecord, oppFields, title, body, stageKey, stageValue }) {
+  const cFields = commitmentRecord.fields || {};
+
+  const userId = asText(cFields[F.COM_DISCORD_USER_ID]).trim();
+  if (!userId) return { sent: false, reason: "no user id" };
+
+  // Require the cart panel IDs so reminder can include 1-click link
+  const dmChannelId = asText(cFields[F.COM_DM_CHANNEL_ID]).trim();
+  const dmPanelMsgId = asText(cFields[F.COM_DM_MESSAGE_ID]).trim();
+
+  // If they don't have a DM panel yet, skip (or you could auto-create DM panel)
+  if (!dmChannelId || !dmPanelMsgId) return { sent: false, reason: "no dm panel" };
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  if (!user) return { sent: false, reason: "user fetch failed" };
+
+  const dm = await user.createDM().catch(() => null);
+  if (!dm) return { sent: false, reason: "dm failed" };
+
+  // Delete previous reminder msg if we have it
+  const prevReminderId = asText(cFields[F.COM_REMINDER_DM_MSG_ID]).trim();
+  if (prevReminderId) await tryDeleteMessage(dm, prevReminderId);
+
+  const closeAtUnix = toUnixSecondsFromAirtableDate(oppFields?.[F.OPP_CLOSE_AT]);
+  const closeCountdown = fmtDiscordRelative(closeAtUnix);
+
+  const cartLink = makeDmPanelLink(dmChannelId, dmPanelMsgId);
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(
+      [
+        body,
+        "",
+        `⏳ **Bulk closes:** **${closeCountdown}**`,
+        cartLink ? `🔗 **Open your cart:** ${cartLink}` : null,
+      ].filter(Boolean).join("\n")
+    )
+    .setColor(0xffd300);
+
+  const msg = await dm.send({ embeds: [embed] }).catch(() => null);
+  if (!msg) return { sent: false, reason: "send failed" };
+
+  // Update reminder state + store the reminder message id
+  const state = getReminderState(cFields);
+  state[stageKey] = stageValue;
+
+  await commitmentsTable.update(commitmentRecord.id, {
+    [F.COM_REMINDER_DM_MSG_ID]: String(msg.id),
+    ...setReminderStatePatch(state),
+  });
+
+  return { sent: true, msgId: msg.id };
+}
+
+/* =========================
+   REMINDERS: PUBLIC CLOSE WARNINGS
+========================= */
+
+async function postOrReplaceCloseWarning({ oppRecordId, oppFields, stage }) {
+  const publicChannelId = asText(oppFields["Discord Public Channel ID"]).trim() || String(BULK_PUBLIC_CHANNEL_ID);
+  if (!publicChannelId) return;
+
+  const ch = await client.channels.fetch(String(publicChannelId)).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
+
+  // Delete previous warning message if exists
+  const prevWarnId = asText(oppFields[F.OPP_CLOSE_WARN_MSG_ID]).trim();
+  if (prevWarnId) await tryDeleteMessage(ch, prevWarnId);
+
+  const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
+  const closeAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_CLOSE_AT]);
+  const closeCountdown = fmtDiscordRelative(closeAtUnix);
+
+  const embed = new EmbedBuilder()
+    .setTitle(stage === 2 ? "⏰ LAST CALL (closing soon)" : "⏰ Bulk closing soon")
+    .setDescription(
+      [
+        `**SKU:** \`${sku}\``,
+        `⏳ **Closes:** **${closeCountdown}**`,
+        "",
+        "✅ Join now and submit your sizes before it closes.",
+      ].join("\n")
+    )
+    .setColor(0xffd300);
+
+  // We can optionally also reference the original public post with the Join button (message link),
+  // but simplest is just a fresh warning message.
+  const msg = await ch.send({ embeds: [embed] }).catch(() => null);
+  if (!msg) return;
+
+  await oppsTable.update(oppRecordId, {
+    [F.OPP_CLOSE_WARN_MSG_ID]: String(msg.id),
+    [F.OPP_CLOSE_WARN_STAGE]: stage,
+  });
+}
+
+
 
 /* =========================
    HELPERS
@@ -1233,7 +1386,243 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
   await ensureRequestBulksMessage();
   await ensureInitiateQuoteMessagesForSuppliers();
+
+  // Start reminders
+  setInterval(() => runReminderTick(), REMINDER_TICK_MS);
+
+  // Optional: run once immediately after boot
+  setTimeout(() => runReminderTick(), 15 * 1000);
 });
+
+
+/* =========================
+   REMINDERS: MAIN TICK
+========================= */
+
+const REMINDER_TICK_MS = 2 * 60 * 1000; // every 2 minutes
+const MAX_REMINDERS_PER_TICK = 12;
+
+// Helper: check if a stage already sent
+function hasStage(state, key, expected) {
+  return state?.[key] === expected;
+}
+
+async function runReminderTick() {
+  try {
+    // 1) Get open opportunities
+    const opps = await oppsTable
+      .select({
+        maxRecords: 200,
+        filterByFormula: `{${F.OPP_STATUS}}='Open'`,
+      })
+      .all();
+
+    let sentCount = 0;
+
+    for (const opp of opps) {
+      if (sentCount >= MAX_REMINDERS_PER_TICK) break;
+
+      const oppFields = opp.fields || {};
+      const oppId = opp.id;
+
+      const closeAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_CLOSE_AT]);
+      const msToClose = msUntil(closeAtUnix);
+
+      // Skip if no close date
+      if (msToClose === null) continue;
+
+      // If already closed time passed, don't reminder here (your close automation handles closure)
+      if (msToClose <= 0) continue;
+
+      const minutesToClose = Math.floor(msToClose / 60000);
+
+      // 2) Public close warnings (anti-clutter)
+      // Stage 1: 60 min
+      // Stage 2: 10 min (optional)
+      const lastStage = Number(oppFields[F.OPP_CLOSE_WARN_STAGE] ?? 0) || 0;
+
+      if (minutesToClose <= 60 && minutesToClose > 55 && lastStage < 1) {
+        await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 1 });
+      }
+      if (minutesToClose <= 10 && minutesToClose > 5 && lastStage < 2) {
+        await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 2 });
+      }
+
+      // 3) Load commitments for this opportunity
+      const commitments = await commitmentsTable
+        .select({
+          maxRecords: 1000,
+          filterByFormula: `{${F.COM_OPP_RECORD_ID}}='${escapeForFormula(oppId)}'`,
+        })
+        .all();
+
+      for (const c of commitments) {
+        if (sentCount >= MAX_REMINDERS_PER_TICK) break;
+
+        const cFields = c.fields || {};
+        const st = asText(cFields[F.COM_STATUS]) || "";
+
+        // Ignore cancelled / paid
+        if (st === "Cancelled" || st === "Paid" || st === "Deposit Paid") continue;
+
+        const state = getReminderState(cFields);
+
+        // ===== A) Draft reminders (joined but never submitted anything) =====
+        if (st === "Draft") {
+          // Determine if they have ANY cart lines at all
+          const lines = await linesTable
+            .select({
+              maxRecords: 1,
+              filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(c.id)}'`,
+            })
+            .firstPage();
+
+          const hasAnyLines = lines.length > 0;
+
+          // Reminder stage: draft_1 (60 min after join)
+          // Use COM_COMMITTED_AT if you set it; else fallback to Created At in Airtable is harder to access.
+          // Your createCommitment sets COM_LAST_ACTIVITY, not COM_COMMITTED_AT in the snippet; if COM_COMMITTED_AT is populated in Airtable, use it.
+          const committedAt = asText(cFields[F.COM_COMMITTED_AT]).trim() || asText(cFields["Created At"]).trim();
+          const committedMs = committedAt ? new Date(committedAt).getTime() : null;
+          const minsSinceJoin = committedMs ? Math.floor((Date.now() - committedMs) / 60000) : null;
+
+          if (!hasAnyLines && minsSinceJoin !== null && minsSinceJoin >= 60 && !hasStage(state, "draft", 1)) {
+            const res = await sendOrReplaceCommitmentReminderDM({
+              commitmentRecord: c,
+              oppFields,
+              title: "📝 Don’t forget to submit your cart",
+              body:
+                "You joined this bulk, but you haven’t submitted any pairs yet.\n\n" +
+                "Add your sizes and press **Submit** — otherwise your pairs don’t count.",
+              stageKey: "draft",
+              stageValue: 1,
+            });
+            if (res.sent) sentCount++;
+          }
+
+          // Reminder stage: draft_2 (60 min before close)
+          if (!hasAnyLines && minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "draft", 2)) {
+            const res = await sendOrReplaceCommitmentReminderDM({
+              commitmentRecord: c,
+              oppFields,
+              title: "⏰ Last hour to submit",
+              body:
+                "This bulk is closing soon and you still have **0 submitted pairs**.\n\n" +
+                "If you want to be included, add sizes and press **Submit** now.",
+              stageKey: "draft",
+              stageValue: 2,
+            });
+            if (res.sent) sentCount++;
+          }
+        }
+
+        // ===== B) Editing reminders (added more but didn't submit) =====
+        if (st === "Editing") {
+          // Detect cart differs from last submitted snapshot:
+          const { qtyMap, countedMap } = await getCommitmentLineMaps(c.id);
+          const delta = calcDeltaMap(qtyMap, countedMap); // if non-empty, they changed something
+          const hasChanges = delta.size > 0;
+
+          if (hasChanges) {
+            // last activity
+            const lastAct = asText(cFields[F.COM_LAST_ACTIVITY]).trim();
+            const lastActMs = lastAct ? new Date(lastAct).getTime() : null;
+            const minsSinceAct = lastActMs ? Math.floor((Date.now() - lastActMs) / 60000) : null;
+
+            // Stage 1: 10 min after last activity
+            if (minsSinceAct !== null && minsSinceAct >= 10 && !hasStage(state, "edit", 1)) {
+              const res = await sendOrReplaceCommitmentReminderDM({
+                commitmentRecord: c,
+                oppFields,
+                title: "✅ Don’t forget to press Submit",
+                body:
+                  "You added/edited pairs, but you haven’t pressed **Submit** yet.\n\n" +
+                  "⚠️ **Only submitted pairs count.** Please press **Submit** to lock in your additions.",
+                stageKey: "edit",
+                stageValue: 1,
+              });
+              if (res.sent) sentCount++;
+            }
+
+            // Stage 2: last hour before close (only if still editing)
+            if (minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "edit", 2)) {
+              const res = await sendOrReplaceCommitmentReminderDM({
+                commitmentRecord: c,
+                oppFields,
+                title: "⏰ Last hour — submit your added pairs",
+                body:
+                  "Bulk closes in ~1 hour.\n\n" +
+                  "If you added more sizes, press **Submit** now — otherwise your added pairs won’t count.",
+                stageKey: "edit",
+                stageValue: 2,
+              });
+              if (res.sent) sentCount++;
+            }
+          }
+        }
+
+        // ===== C) Deposit reminders (strict 24h) =====
+        // Use opportunity's Deposit Due At or Finalized At if available
+        const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_DEPOSIT_DUE_AT]);
+        const msToDepositDue = msUntil(depositDueUnix);
+        const depositPct = Number(cFields[F.COM_DEPOSIT_PCT] ?? 0);
+
+        if (st === "Locked" && depositPct > 0 && msToDepositDue !== null && msToDepositDue > 0) {
+          const minsToDue = Math.floor(msToDepositDue / 60000);
+
+          // Stage 1: 12h remaining (or 12h after finalized; but due date is simplest)
+          if (minsToDue <= 12 * 60 && minsToDue > (12 * 60 - 10) && !hasStage(state, "dep", 1)) {
+            const res = await sendOrReplaceCommitmentReminderDM({
+              commitmentRecord: c,
+              oppFields,
+              title: "💳 Deposit reminder",
+              body:
+                "Your commitment is locked, but the **deposit is still unpaid**.\n\n" +
+                "Please pay deposit ASAP — unpaid deposits are cancelled at the deadline (zero tolerance).",
+              stageKey: "dep",
+              stageValue: 1,
+            });
+            if (res.sent) sentCount++;
+          }
+
+          // Stage 2: 2h remaining
+          if (minsToDue <= 120 && minsToDue > 110 && !hasStage(state, "dep", 2)) {
+            const res = await sendOrReplaceCommitmentReminderDM({
+              commitmentRecord: c,
+              oppFields,
+              title: "⏰ 2 hours left to pay deposit",
+              body:
+                "Deposit deadline is close.\n\n" +
+                "⚠️ If deposit isn’t paid in time, your commitment will be **cancelled automatically**.",
+              stageKey: "dep",
+              stageValue: 2,
+            });
+            if (res.sent) sentCount++;
+          }
+
+          // Stage 3: 30m remaining
+          if (minsToDue <= 30 && minsToDue > 25 && !hasStage(state, "dep", 3)) {
+            const res = await sendOrReplaceCommitmentReminderDM({
+              commitmentRecord: c,
+              oppFields,
+              title: "🚨 30 minutes left to pay deposit",
+              body:
+                "Final reminder: deposit deadline is in **~30 minutes**.\n\n" +
+                "If deposit is not received, you’ll be left out and cancelled.",
+              stageKey: "dep",
+              stageValue: 3,
+            });
+            if (res.sent) sentCount++;
+          }
+        }
+      }
+    }
+
+    if (sentCount > 0) console.log(`🔔 Reminder tick sent ${sentCount} reminder(s).`);
+  } catch (e) {
+    console.warn("⚠️ runReminderTick failed:", e?.message || e);
+  }
+}
 
 async function inferGuildId() {
   if (BULK_GUILD_ID) return String(BULK_GUILD_ID);
@@ -1397,9 +1786,11 @@ async function createCommitment({ oppRecordId, buyerRecordId, discordId, discord
     [F.COM_DISCORD_USER_ID]: discordId,
     [F.COM_DISCORD_USER_TAG]: discordTag,
     [F.COM_LAST_ACTIVITY]: nowIso,
+    [F.COM_COMMITTED_AT]: nowIso, // ✅ add this
     [F.COM_OPP_RECORD_ID]: oppRecordId,
   });
 }
+
 
 async function touchCommitment(commitmentRecordId, patch = {}) {
   const payload = { [F.COM_LAST_ACTIVITY]: new Date().toISOString(), ...patch };
