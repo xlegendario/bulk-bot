@@ -1458,7 +1458,55 @@ async function runReminderTick() {
         })
         .all();
 
+      /**
+       * ✅ DEDUPE commitments per user per opportunity.
+       * Reason: user can accidentally create 2 commitment rows (double click / re-join / onboarding restart),
+       * which would cause duplicate reminders + no deletion (because reminder msg id is stored per record).
+       *
+       * We keep ONLY the newest commitment per Discord User ID.
+       */
+      const byUser = new Map(); // discordUserId -> commitment record (newest)
       for (const c of commitments) {
+        const uid = asText(c.fields?.[F.COM_DISCORD_USER_ID]).trim();
+        if (!uid) continue;
+
+        const existing = byUser.get(uid);
+        if (!existing) {
+          byUser.set(uid, c);
+          continue;
+        }
+
+        const aRaw = asText(c.fields?.[F.COM_COMMITTED_AT]).trim() || asText(c.fields?.["Created At"]).trim();
+        const bRaw = asText(existing.fields?.[F.COM_COMMITTED_AT]).trim() || asText(existing.fields?.["Created At"]).trim();
+
+        const a = aRaw ? new Date(aRaw).getTime() : 0;
+        const b = bRaw ? new Date(bRaw).getTime() : 0;
+
+        if (a >= b) byUser.set(uid, c);
+      }
+
+      const dedupedCommitments = Array.from(byUser.values());
+
+      /**
+       * OPTIONAL CLEANUP (recommended):
+       * Cancel older duplicate Draft commitments so Airtable stays clean.
+       * This does NOT affect normal flow, it only prevents dead duplicate rows from existing forever.
+       */
+      for (const c of commitments) {
+        const uid = asText(c.fields?.[F.COM_DISCORD_USER_ID]).trim();
+        if (!uid) continue;
+
+        const keeper = byUser.get(uid);
+        if (!keeper || keeper.id === c.id) continue;
+
+        const st = asText(c.fields?.[F.COM_STATUS]) || "";
+        if (st === "Draft") {
+          await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" }).catch(() => {});
+        }
+      }
+
+      // Use deduped commitments for reminders
+      for (const c of dedupedCommitments) {
         if (sentCount >= MAX_REMINDERS_PER_TICK) break;
 
         const cFields = c.fields || {};
@@ -1478,12 +1526,9 @@ async function runReminderTick() {
               filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(c.id)}'`,
             })
             .firstPage();
-
+  
           const hasAnyLines = lines.length > 0;
 
-          // Reminder stage: draft_1 (60 min after join)
-          // Use COM_COMMITTED_AT if you set it; else fallback to Created At in Airtable is harder to access.
-          // Your createCommitment sets COM_LAST_ACTIVITY, not COM_COMMITTED_AT in the snippet; if COM_COMMITTED_AT is populated in Airtable, use it.
           const committedAt = asText(cFields[F.COM_COMMITTED_AT]).trim() || asText(cFields["Created At"]).trim();
           const committedMs = committedAt ? new Date(committedAt).getTime() : null;
           const minsSinceJoin = committedMs ? Math.floor((Date.now() - committedMs) / 60000) : null;
@@ -1520,18 +1565,15 @@ async function runReminderTick() {
 
         // ===== B) Editing reminders (added more but didn't submit) =====
         if (st === "Editing") {
-          // Detect cart differs from last submitted snapshot:
           const { qtyMap, countedMap } = await getCommitmentLineMaps(c.id);
-          const delta = calcDeltaMap(qtyMap, countedMap); // if non-empty, they changed something
+          const delta = calcDeltaMap(qtyMap, countedMap);
           const hasChanges = delta.size > 0;
 
           if (hasChanges) {
-            // last activity
             const lastAct = asText(cFields[F.COM_LAST_ACTIVITY]).trim();
             const lastActMs = lastAct ? new Date(lastAct).getTime() : null;
             const minsSinceAct = lastActMs ? Math.floor((Date.now() - lastActMs) / 60000) : null;
 
-            // Stage 1: 10 min after last activity
             if (minsSinceAct !== null && minsSinceAct >= 10 && !hasStage(state, "edit", 1)) {
               const res = await sendOrReplaceCommitmentReminderDM({
                 commitmentRecord: c,
@@ -1546,7 +1588,6 @@ async function runReminderTick() {
               if (res.sent) sentCount++;
             }
 
-            // Stage 2: last hour before close (only if still editing)
             if (minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "edit", 2)) {
               const res = await sendOrReplaceCommitmentReminderDM({
                 commitmentRecord: c,
@@ -1564,7 +1605,6 @@ async function runReminderTick() {
         }
 
         // ===== C) Deposit reminders (strict 24h) =====
-        // Use opportunity's Finalized At if available
         const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
         const msToDepositDue = msUntil(depositDueUnix);
         const depositPct = Number(cFields[F.COM_DEPOSIT_PCT] ?? 0);
@@ -1572,8 +1612,7 @@ async function runReminderTick() {
         if (st === "Locked" && depositPct > 0 && msToDepositDue !== null && msToDepositDue > 0) {
           const minsToDue = Math.floor(msToDepositDue / 60000);
 
-          // Stage 1: 12h remaining (or 12h after finalized; but due date is simplest)
-          if (minsToDue <= 12 * 60 && minsToDue > (12 * 60 - 10) && !hasStage(state, "dep", 1)) {
+          if (minsToDue <= 12 * 60 && minsToDue > 12 * 60 - 10 && !hasStage(state, "dep", 1)) {
             const res = await sendOrReplaceCommitmentReminderDM({
               commitmentRecord: c,
               oppFields,
@@ -1587,7 +1626,6 @@ async function runReminderTick() {
             if (res.sent) sentCount++;
           }
 
-          // Stage 2: 2h remaining
           if (minsToDue <= 120 && minsToDue > 110 && !hasStage(state, "dep", 2)) {
             const res = await sendOrReplaceCommitmentReminderDM({
               commitmentRecord: c,
@@ -1602,7 +1640,6 @@ async function runReminderTick() {
             if (res.sent) sentCount++;
           }
 
-          // Stage 3: 30m remaining
           if (minsToDue <= 30 && minsToDue > 25 && !hasStage(state, "dep", 3)) {
             const res = await sendOrReplaceCommitmentReminderDM({
               commitmentRecord: c,
