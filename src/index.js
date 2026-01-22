@@ -4628,6 +4628,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const okSubmit = await safeDeferReply(interaction, deferEphemeralIfGuild(inGuild));
     if (!okSubmit) return;
 
+    // ===== Remaining reservation bookkeeping (for rollback on failure) =====
+    let reserved = false;
+    let reservedDeltaMap = null;
+    
     try {
       // Only in DMs (your existing behavior)
       if (inGuild) {
@@ -4648,18 +4652,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return void (await interaction.editReply("⚠️ Your cart is empty."));
       }
 
-      // ===== Remaining reservation bookkeeping (for rollback on failure) =====
-      let reserved = false;
-      let reservedDeltaMap = null;
-
       const opp = await oppsTable.find(oppRecordId);
       const oppFields = opp.fields || {};
-      const remainingRaw = asText(oppFields?.[F.OPP_REMAINING_QTY_JSON]).trim();
 
-      if (remainingRaw) {
+      // IMPORTANT: only treat as limited if Remaining JSON is a REAL map (not empty "{}")
+      const remainingRaw = asText(oppFields?.[F.OPP_REMAINING_QTY_JSON]).trim();
+      const isLimited = !!remainingRaw && remainingRaw !== "{}";
+
+      if (isLimited) {
         const { qtyMap, countedMap } = await getCommitmentLineMaps(commitment.id);
         const deltaMap = calcDeltaMap(qtyMap, countedMap);
 
+        // Only reserve if something changed vs last snapshot
         if (deltaMap.size > 0) {
           const reserveResult = await withOppLock(oppRecordId, async () => {
             const freshOpp = await oppsTable.find(oppRecordId);
@@ -4727,8 +4731,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           reserved = true;
           reservedDeltaMap = deltaMap;
 
+          // If we hit zero remaining => sold out => close immediately
           if (reserveResult.totalRemaining === 0) {
-            // ✅ IMPORTANT: snapshot THIS buyer first so Requested Quote has sizes
             await touchCommitment(commitment.id, {
               [F.COM_STATUS]: "Submitted",
               [F.COM_COMMITTED_AT]: new Date().toISOString(),
@@ -4736,20 +4740,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
             await snapshotCountedQuantities(commitment.id);
 
-            // ✅ Now close immediately (this locks commitments + builds Requested Quote correctly)
             await closeOpportunityInternal(oppRecordId);
-
-            // ✅ Update public one last time (optional)
             await syncPublic(oppRecordId);
 
-            // ✅ Do NOT refreshDmPanel here (closeOpportunityInternal already syncs/locks DMs)
             await interaction.editReply("✅ Submitted! Bulk sold out and is now closed.");
             return;
           }
         }
       }
 
-      // ✅ mark this buyer as submitted + snapshot before we close
+      // ✅ Normal submit behavior (BOTH limited and normal bulks):
+      // mark Submitted + snapshot. We DO NOT close normal bulks here.
       await touchCommitment(commitment.id, {
         [F.COM_STATUS]: "Submitted",
         [F.COM_COMMITTED_AT]: new Date().toISOString(),
@@ -4757,14 +4758,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       await snapshotCountedQuantities(commitment.id);
 
-      // ✅ now close immediately (this will lock commitments + build Requested Quote)
-      await closeOpportunityInternal(oppRecordId);
+      // Update totals + pricing for normal bulks (limited bulks can optionally skip this, but it's safe)
+      await recalcOpportunityTotals(oppRecordId).catch(() => {});
+      await syncPublic(oppRecordId).catch(() => {});
 
-      // ✅ update public embed one last time (optional but nice)
-      await syncPublic(oppRecordId);
+      // Refresh DM panel so buyer sees Locked/Submitted state
+      await refreshDmPanel(oppRecordId, commitment.id);
 
-      // ✅ DO NOT refreshDmPanel here (closeOpportunityInternal already syncs/locks DMs)
-      await interaction.editReply("✅ Submitted! Bulk sold out and is now closed.");
+      // ✅ Correct messages:
+      if (isLimited) {
+        await interaction.editReply("✅ Submitted! Your pairs are reserved (limited stock).");
+      } else {
+        await interaction.editReply("✅ Submitted! Your pairs are locked in.");
+      }
       return;
     } catch (err) {
       console.error("cart_submit error:", err);
