@@ -7,7 +7,9 @@ import {
   TextInputBuilder,
   TextInputStyle,
   Events,
+  MessageFlags,
 } from "discord.js";
+
 
 export function registerGatekeeping(ctx) {
   const { client, base, env } = ctx;
@@ -132,11 +134,27 @@ export function registerGatekeeping(ctx) {
         const ig = interaction.fields.getTextInputValue(GK.IG)?.trim() || "";
         const note = interaction.fields.getTextInputValue(GK.NOTE)?.trim() || "";
 
-        await interaction
-          .reply({ content: "✅ You’re on the waitlist. We’ll review requests regularly.", ephemeral: true })
-          .catch(() => {});
+        // ✅ ACK immediately so the interaction never expires (10062)
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-        // Prevent duplicates: if they already have a Pending record, update it instead of creating a new one
+        // OPTIONAL: If user is already in server and somehow doesn't have Pending, add it
+        // (GuildMemberAdd only runs on join; this makes testing easier.)
+        try {
+          const gid = String(ACCESS_GUILD_ID || interaction.guildId || "");
+          if (gid) {
+            const guild = await client.guilds.fetch(gid).catch(() => null);
+            if (guild) {
+              const member = await guild.members.fetch(user.id).catch(() => null);
+              if (member) {
+                if (!member.roles.cache.has(String(MEMBER_ROLE_ID)) && !member.roles.cache.has(String(PENDING_ROLE_ID))) {
+                  await member.roles.add(String(PENDING_ROLE_ID)).catch(() => {});
+                }
+              }
+            }
+          }
+        } catch {}
+
+        // Prevent duplicates: update existing record if user already applied
         const existing = await waitlistTable
           .select({
             maxRecords: 1,
@@ -162,6 +180,11 @@ export function registerGatekeeping(ctx) {
         } else {
           await waitlistTable.create(fields).catch(() => {});
         }
+
+        // ✅ Now respond (edit deferred reply)
+        await interaction
+          .editReply("✅ You’re on the waitlist. We’ll review requests regularly.")
+          .catch(() => {});
 
         return;
       }
