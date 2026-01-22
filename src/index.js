@@ -5232,17 +5232,12 @@ async function closeOpportunityInternal(opportunityRecordId) {
   const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
   await postSupplierDraftQuoteToSupplierServer({ oppRecordId: opportunityRecordId, oppFields, currency });
 
-  // Post supplier + admin draft quote messages (existing function in your script)
-  const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
-  await postSupplierDraftQuoteToSupplierServer({ oppRecordId: opportunityRecordId, oppFields, currency });
-
   // Sync public + DMs to reflect closure
   await syncPublic(opportunityRecordId);
   await syncDms(opportunityRecordId);
 
   return { closed: true };
-}
-
+  }
 
 app.post("/close-opportunity", async (req, res) => {
   try {
