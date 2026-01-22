@@ -144,7 +144,6 @@ const F = {
   OPP_STATUS: "Status", // Draft/Open/Closed/Confirmed/Cancelled
   OPP_DISCORD_CATEGORY_ID: "Discord Category ID",
   OPP_QUOTES_MESSAGE_ID: "Discord Quotes Message ID",
-  OPP_DEPOSIT_DUE_AT: "Deposit Due At",
   OPP_SUPPLIER_LINK: "Supplier", // linked field on Opportunities
   OPP_CLOSE_AT: "Close At",
   OPP_FINALIZED_AT: "Finalized At",
@@ -1562,8 +1561,8 @@ async function runReminderTick() {
         }
 
         // ===== C) Deposit reminders (strict 24h) =====
-        // Use opportunity's Deposit Due At or Finalized At if available
-        const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_DEPOSIT_DUE_AT]);
+        // Use opportunity's Finalized At if available
+        const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
         const msToDepositDue = msUntil(depositDueUnix);
         const depositPct = Number(cFields[F.COM_DEPOSIT_PCT] ?? 0);
 
