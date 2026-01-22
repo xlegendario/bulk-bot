@@ -390,6 +390,42 @@ async function postOrReplaceCloseWarning({ oppRecordId, oppFields, stage }) {
   });
 }
 
+async function clearCloseWarningForOpp(oppRecordId, oppFields) {
+  try {
+    const publicChannelId =
+      asText(oppFields?.["Discord Public Channel ID"]).trim() || String(BULK_PUBLIC_CHANNEL_ID);
+
+    const warnMsgId = asText(oppFields?.[F.OPP_CLOSE_WARN_MSG_ID]).trim();
+
+    // If we don't have the IDs, still clear Airtable fields (clean state)
+    if (!publicChannelId || !warnMsgId) {
+      await oppsTable
+        .update(oppRecordId, {
+          [F.OPP_CLOSE_WARN_MSG_ID]: "",
+          [F.OPP_CLOSE_WARN_STAGE]: null,
+        })
+        .catch(() => {});
+      return;
+    }
+
+    // Try delete message in channel
+    const ch = await client.channels.fetch(String(publicChannelId)).catch(() => null);
+    if (ch && ch.isTextBased()) {
+      await tryDeleteMessage(ch, warnMsgId);
+    }
+
+    // Clear fields in Airtable so future warnings can be created cleanly
+    await oppsTable
+      .update(oppRecordId, {
+        [F.OPP_CLOSE_WARN_MSG_ID]: "",
+        [F.OPP_CLOSE_WARN_STAGE]: null,
+      })
+      .catch(() => {});
+  } catch (e) {
+    console.warn("⚠️ clearCloseWarningForOpp failed:", e?.message || e);
+  }
+}
+
 
 
 /* =========================
@@ -5261,6 +5297,9 @@ async function closeOpportunityInternal(opportunityRecordId) {
 
     await syncPublic(opportunityRecordId);
     await syncDms(opportunityRecordId);
+
+    // ✅ NEW cleanup
+    await clearCloseWarningForOpp(opportunityRecordId, oppFields);
 
     return { cancelled: true, reason: "no_locked_commitments" };
   }
