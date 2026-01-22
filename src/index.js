@@ -1408,6 +1408,13 @@ const client = new Client({
   partials: [Partials.Channel, Partials.Message],
 });
 
+// 👇 ADD THIS BLOCK RIGHT HERE
+registerGatekeeping({
+  client,
+  base,
+  env: process.env,
+});
+
 client.on("error", (err) => {
   console.error("Discord client error:", err);
 });
