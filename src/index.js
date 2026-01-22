@@ -970,9 +970,12 @@ function sizeToNumberForCompare(s) {
   return base;
 }
 
-function normalizeSizeToLadder(ladder, rawSize) {
+function normalizeSizeToLadder(ladder, rawSize, opts = {}) {
   const raw = String(rawSize || "").trim();
   if (!raw) return { ok: false };
+
+  const prefer = opts.prefer || "nearest"; // "down" | "up" | "nearest"
+  const maxDist = Number.isFinite(opts.maxDist) ? opts.maxDist : 0.51; // allow half-step snapping
 
   // Exact match = perfect
   if (ladder.includes(raw)) return { ok: true, value: raw };
@@ -980,16 +983,37 @@ function normalizeSizeToLadder(ladder, rawSize) {
   const rawNum = sizeToNumberForCompare(raw);
   if (rawNum === null) return { ok: false };
 
-  // Compute numeric ladder
   const ladderNums = ladder
     .map((s) => ({ s, n: sizeToNumberForCompare(s) }))
-    .filter((x) => x.n !== null);
+    .filter((x) => x.n !== null)
+    .sort((a, b) => a.n - b.n);
 
   if (!ladderNums.length) return { ok: false };
 
-  // Find closest
+  // Prefer DOWN: greatest ladder size <= raw
+  if (prefer === "down") {
+    let candidate = null;
+    for (const x of ladderNums) {
+      if (x.n <= rawNum) candidate = x;
+      else break;
+    }
+    if (!candidate) candidate = ladderNums[0]; // clamp to min
+    const dist = Math.abs(candidate.n - rawNum);
+    if (dist > maxDist) return { ok: false };
+    return { ok: true, value: candidate.s };
+  }
+
+  // Prefer UP: smallest ladder size >= raw
+  if (prefer === "up") {
+    const candidate = ladderNums.find((x) => x.n >= rawNum) || ladderNums[ladderNums.length - 1]; // clamp to max
+    const dist = Math.abs(candidate.n - rawNum);
+    if (dist > maxDist) return { ok: false };
+    return { ok: true, value: candidate.s };
+  }
+
+  // Nearest (fallback)
   let best = ladderNums[0];
-  let bestDist = Math.abs(ladderNums[0].n - rawNum);
+  let bestDist = Math.abs(best.n - rawNum);
 
   for (const x of ladderNums) {
     const d = Math.abs(x.n - rawNum);
@@ -999,29 +1023,8 @@ function normalizeSizeToLadder(ladder, rawSize) {
     }
   }
 
-  // Too far away => reject (prevents weird inputs mapping wrongly)
-  if (bestDist > 0.34) return { ok: false };
-
+  if (bestDist > maxDist) return { ok: false };
   return { ok: true, value: best.s };
-}
-
-
-// --------------------------
-// Initiate Quote sessions (Specific flow)
-// key: stockSetupMessageId
-// value: { presetId, brandLabel, ladder, qtyMap: Map(size -> qty), createdBy }
-// --------------------------
-const initiateQuoteSessions = new Map();
-
-// Set Size Preset helper. Prefer a "Brand" column if you add one, else fall back to common primary field names
-function getPresetLabelFromRecord(r) {
-  return (
-    asText(r.fields?.Brand) ||
-    asText(r.fields?.Name) ||
-    asText(r.fields?.Preset) ||
-    asText(r.fields?.["Preset Name"]) ||
-    r.id
-  );
 }
 
 async function fetchAllBrandPresets() {
@@ -3836,8 +3839,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (!sku) return void (await interaction.editReply("❌ SKU required."));
     if (!min || !max) return void (await interaction.editReply("❌ Min and Max size required."));
-    const minNorm = normalizeSizeToLadder(preset.ladder, min);
-    const maxNorm = normalizeSizeToLadder(preset.ladder, max);
+    const minNorm = normalizeSizeToLadder(preset.ladder, min, { prefer: "down", maxDist: 0.51 });
+    const maxNorm = normalizeSizeToLadder(preset.ladder, max, { prefer: "up", maxDist: 0.51 });
 
     if (!minNorm.ok || !maxNorm.ok) {
       const examples = preset.ladder.slice(0, 10).join(", ");
@@ -5184,7 +5187,39 @@ async function closeOpportunityInternal(opportunityRecordId) {
     .all();
 
   const lockedIds = locked.map((c) => c.id);
+
+  // ✅ If nobody submitted -> cancel & stop (no supplier quote)
+  if (!lockedIds.length) {
+    await oppsTable.update(opportunityRecordId, {
+      [F.OPP_STATUS]: "Cancelled",
+      [F.OPP_REQUESTED_QUOTE]: "",
+      [F.OPP_SUPPLIER_QUOTE_WORKING]: "",
+      [F.OPP_SUPPLIER_QUOTE_STATUS]: "",
+    });
+
+    await syncPublic(opportunityRecordId);
+    await syncDms(opportunityRecordId);
+
+    return { cancelled: true, reason: "no_locked_commitments" };
+  }
+
   const requestedMap = await buildRequestedQuoteMapForLockedCommitments(opportunityRecordId, lockedIds);
+
+  // ✅ If map ends up empty -> cancel & stop
+  if (!requestedMap || requestedMap.size === 0) {
+    await oppsTable.update(opportunityRecordId, {
+      [F.OPP_STATUS]: "Cancelled",
+      [F.OPP_REQUESTED_QUOTE]: "",
+      [F.OPP_SUPPLIER_QUOTE_WORKING]: "",
+      [F.OPP_SUPPLIER_QUOTE_STATUS]: "",
+    });
+
+    await syncPublic(opportunityRecordId);
+    await syncDms(opportunityRecordId);
+
+    return { cancelled: true, reason: "empty_requested_quote" };
+  }
+
   const requestedJson = mapToQuoteJson(requestedMap);
 
   await oppsTable.update(opportunityRecordId, {
@@ -5192,6 +5227,10 @@ async function closeOpportunityInternal(opportunityRecordId) {
     [F.OPP_SUPPLIER_QUOTE_WORKING]: requestedJson,
     [F.OPP_SUPPLIER_QUOTE_STATUS]: "Pending",
   });
+
+  // Post supplier + admin draft quote messages (only if we actually have pairs)
+  const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
+  await postSupplierDraftQuoteToSupplierServer({ oppRecordId: opportunityRecordId, oppFields, currency });
 
   // Post supplier + admin draft quote messages (existing function in your script)
   const currency = asText(oppFields[F.OPP_CURRENCY]) || "EUR";
@@ -5393,6 +5432,20 @@ app.post("/finalize-opportunity", async (req, res) => {
         await commitmentsTable.update(c.id, { [F.COM_STATUS]: "Cancelled" });
         cancelled++;
       }
+    }
+
+    // ✅ If nobody is eligible (no deposits / no paid / etc.) -> cancel and stop
+    if (!eligibleCommitmentIds.length) {
+      await oppsTable.update(opportunityRecordId, {
+        [F.OPP_STATUS]: "Cancelled",
+      });
+
+      return res.json({
+        ok: true,
+        cancelled: true,
+        reason: "no_eligible_commitments",
+        cancelledCommitments: cancelled,
+      });
     }
 
     // ---- Use Final Quote (supplier-confirmed) for final summaries ----
