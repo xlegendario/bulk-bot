@@ -10,7 +10,6 @@ import {
   MessageFlags,
 } from "discord.js";
 
-
 export function registerGatekeeping(ctx) {
   const { client, base, env } = ctx;
 
@@ -20,6 +19,7 @@ export function registerGatekeeping(ctx) {
     ACCESS_GUILD_ID,
     PENDING_ROLE_ID,
     MEMBER_ROLE_ID,
+    WAITLIST_INVITE_URL = "", // optional, for DM after apply
   } = env;
 
   if (!GET_ACCESS_CHANNEL_ID || !PENDING_ROLE_ID || !MEMBER_ROLE_ID) {
@@ -122,6 +122,7 @@ export function registerGatekeeping(ctx) {
     try {
       // Open modal
       if (interaction.isButton() && interaction.customId === GK.APPLY_BTN) {
+        // IMPORTANT: do NOT defer; modals must be shown immediately
         await interaction.showModal(buildWaitlistModal()).catch(() => {});
         return;
       }
@@ -137,8 +138,7 @@ export function registerGatekeeping(ctx) {
         // ✅ ACK immediately so the interaction never expires (10062)
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-        // OPTIONAL: If user is already in server and somehow doesn't have Pending, add it
-        // (GuildMemberAdd only runs on join; this makes testing easier.)
+        // If user is already in server and doesn't have Pending, add it (makes testing easier)
         try {
           const gid = String(ACCESS_GUILD_ID || interaction.guildId || "");
           if (gid) {
@@ -154,6 +154,8 @@ export function registerGatekeeping(ctx) {
           }
         } catch {}
 
+        console.log("GK: submit received from", user.id, user.tag, "country:", country);
+
         // Prevent duplicates: update existing record if user already applied
         const existing = await waitlistTable
           .select({
@@ -161,7 +163,10 @@ export function registerGatekeeping(ctx) {
             filterByFormula: `{Discord User ID}='${String(user.id).replace(/'/g, "\\'")}'`,
           })
           .firstPage()
-          .catch(() => []);
+          .catch((e) => {
+            console.error("GK: Airtable select failed:", e);
+            return [];
+          });
 
         const fields = {
           "Discord User ID": user.id,
@@ -171,21 +176,42 @@ export function registerGatekeeping(ctx) {
           "Note": note,
           "Status": "Pending",
           "Applied At": new Date().toISOString(),
+
+          // Use proper types for Airtable:
           "Discord Role Granted": false,
-          "Granted At": "",
+          "Granted At": null,
         };
 
-        if (existing.length) {
-          await waitlistTable.update(existing[0].id, fields).catch(() => {});
-        } else {
-          await waitlistTable.create(fields).catch(() => {});
+        try {
+          if (existing.length) {
+            await waitlistTable.update(existing[0].id, fields);
+            console.log("GK: updated waitlist record for", user.id);
+          } else {
+            const created = await waitlistTable.create(fields);
+            console.log("GK: created waitlist record", created.id, "for", user.id);
+          }
+        } catch (e) {
+          console.error("GK: Airtable write failed:", e);
+          await interaction.editReply("⚠️ Could not save your request. Please try again in 1 minute.").catch(() => {});
+          return;
         }
 
-        // ✅ Now respond (edit deferred reply)
-        await interaction
-          .editReply("✅ You’re on the waitlist. We’ll review requests regularly.")
-          .catch(() => {});
+        // Optional DM with invite link + story
+        const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
+        if (inviteUrl) {
+          const dmText = [
+            "✅ **Thanks — you’re on the waitlist.**",
+            "",
+            "Kickz Caviar Bulk is built to give more buyers access to group bulk buying + supplier network opportunities they normally wouldn’t reach alone.",
+            "",
+            `Invite link you can share: ${inviteUrl}`,
+            "Invite activity may be taken into account when granting access.",
+          ].join("\n");
 
+          await user.send(dmText).catch(() => {});
+        }
+
+        await interaction.editReply("✅ You’re on the waitlist. We’ll review requests regularly.").catch(() => {});
         return;
       }
     } catch (e) {
@@ -199,7 +225,6 @@ export function registerGatekeeping(ctx) {
 
   async function pollAndGrant() {
     try {
-      // Only records approved and not yet granted
       const rows = await waitlistTable
         .select({
           maxRecords: 200,
@@ -227,17 +252,15 @@ export function registerGatekeeping(ctx) {
         const member = await guild.members.fetch(discordId).catch(() => null);
         if (!member) continue;
 
-        // Grant member, remove pending
         await member.roles.add(String(MEMBER_ROLE_ID)).catch(() => {});
         await member.roles.remove(String(PENDING_ROLE_ID)).catch(() => {});
 
-        // Mark record as granted so it won't repeat
         await waitlistTable
           .update(r.id, {
             "Discord Role Granted": true,
             "Granted At": new Date().toISOString(),
           })
-          .catch(() => {});
+          .catch((e) => console.error("GK: failed to update granted flags:", e));
 
         processed++;
       }
@@ -249,8 +272,9 @@ export function registerGatekeeping(ctx) {
   }
 
   client.once(Events.ClientReady, async () => {
+    console.log("✅ Gatekeeping ready. Table:", ACCESS_WAITLIST_TABLE);
     await ensureGetAccessMessage();
     setInterval(pollAndGrant, POLL_MS);
-    setTimeout(pollAndGrant, 10 * 1000); // quick first run after boot
+    setTimeout(pollAndGrant, 10 * 1000);
   });
 }
