@@ -1027,12 +1027,31 @@ function normalizeSizeToLadder(ladder, rawSize, opts = {}) {
   return { ok: true, value: best.s };
 }
 
+// Size Preset helper: determine label shown in the brand picker
+function getPresetLabelFromRecord(r) {
+  return (
+    asText(r.fields?.Brand) ||
+    asText(r.fields?.Name) ||
+    asText(r.fields?.Preset) ||
+    asText(r.fields?.["Preset Name"]) ||
+    asText(r.fields?.["Brand Name"]) ||
+    r.id
+  );
+}
+
+
 async function fetchAllBrandPresets() {
   const records = await sizePresetsTable.select({ maxRecords: 200 }).all();
   const out = records
     .map((r) => ({
       id: r.id,
-      label: getPresetLabelFromRecord(r),
+      label:
+        asText(r.fields?.Brand) ||
+        asText(r.fields?.Name) ||
+        asText(r.fields?.Preset) ||
+        asText(r.fields?.["Preset Name"]) ||
+        asText(r.fields?.["Brand Name"]) ||
+        r.id,
       ladder: parseLadder(r.fields?.[F.PRESET_SIZE_LADDER]),
     }))
     .filter((x) => x.label && Array.isArray(x.ladder) && x.ladder.length);
