@@ -348,6 +348,50 @@ async function sendOrReplaceCommitmentReminderDM({ commitmentRecord, oppFields, 
   return { sent: true, msgId: msg.id };
 }
 
+async function sendOrReplaceCommitmentReminderDeal({ commitmentRecord, oppFields, title, body, stageKey, stageValue }) {
+  const cFields = commitmentRecord.fields || {};
+
+  const dealChannelId = asText(cFields[F.COM_DEAL_CHANNEL_ID]).trim();
+  if (!dealChannelId) return { sent: false, reason: "no deal channel id" };
+
+  const ch = await client.channels.fetch(String(dealChannelId)).catch(() => null);
+  if (!ch || !ch.isTextBased()) return { sent: false, reason: "deal channel fetch failed" };
+
+  // Delete previous deal reminder if exists
+  const prevReminderId = asText(cFields[F.COM_REMINDER_DEAL_MSG_ID]).trim();
+  if (prevReminderId) await tryDeleteMessage(ch, prevReminderId);
+
+  // Deposit deadline countdown = Finalized At
+  const dueUnix = toUnixSecondsFromAirtableDate(oppFields?.[F.OPP_FINALIZED_AT]);
+  const dueCountdown = fmtDiscordRelative(dueUnix);
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(
+      [
+        body,
+        "",
+        `⏳ **Deposit deadline:** **${dueCountdown}**`,
+      ].join("\n")
+    )
+    .setColor(0xffd300);
+
+  const msg = await ch.send({ embeds: [embed] }).catch(() => null);
+  if (!msg) return { sent: false, reason: "send failed" };
+
+  // Save reminder state + store message id
+  const state = getReminderState(cFields);
+  state[stageKey] = stageValue;
+
+  await commitmentsTable.update(commitmentRecord.id, {
+    [F.COM_REMINDER_DEAL_MSG_ID]: String(msg.id),
+    ...setReminderStatePatch(state),
+  });
+
+  return { sent: true, msgId: msg.id };
+}
+
+
 /* =========================
    REMINDERS: PUBLIC CLOSE WARNINGS
 ========================= */
@@ -455,6 +499,29 @@ function safeJsonParse(s) {
     return null;
   }
 }
+
+function parseDepositPctToNumber(v) {
+  // Handles Airtable lookup formats: "50%", ["50%"], 50, ["50"], null
+  if (v === null || v === undefined) return 0;
+
+  if (Array.isArray(v)) {
+    const first = v.find((x) => x !== null && x !== undefined);
+    return parseDepositPctToNumber(first);
+  }
+
+  if (typeof v === "object") {
+    const name = v?.name ?? v?.value;
+    return parseDepositPctToNumber(name);
+  }
+
+  const s = String(v).trim();
+  if (!s) return 0;
+
+  const cleaned = s.replace(/[^0-9.]/g, ""); // "50%" -> "50"
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
 
 function formatEtaBusinessDays(v) {
   const n = Number(asText(v));
@@ -1466,11 +1533,19 @@ function hasStage(state, key, expected) {
 
 async function runReminderTick() {
   try {
-    // 1) Get open opportunities
+    // ✅ Load both:
+    // - Open opportunities (draft/edit reminders + public close warnings)
+    // - Deposit phase opportunities (Closed + Supplier Quote Status Confirmed)
     const opps = await oppsTable
       .select({
-        maxRecords: 200,
-        filterByFormula: `{${F.OPP_STATUS}}='Open'`,
+        maxRecords: 500,
+        filterByFormula: `OR(
+          {${F.OPP_STATUS}}='Open',
+          AND(
+            {${F.OPP_STATUS}}='Closed',
+            {${F.OPP_SUPPLIER_QUOTE_STATUS}}='Confirmed'
+          )
+        )`,
       })
       .all();
 
@@ -1482,27 +1557,33 @@ async function runReminderTick() {
       const oppFields = opp.fields || {};
       const oppId = opp.id;
 
-      const closeAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_CLOSE_AT]);
-      const msToClose = msUntil(closeAtUnix);
+      const oppStatus = asText(oppFields[F.OPP_STATUS]).trim();
+      const supQuoteStatus = asText(oppFields[F.OPP_SUPPLIER_QUOTE_STATUS]).trim();
+      const isOpenPhase = oppStatus === "Open";
+      const isDepositPhase = oppStatus === "Closed" && supQuoteStatus === "Confirmed";
 
-      // Skip if no close date
-      if (msToClose === null) continue;
+      // ---- OPEN PHASE timing (close warnings + draft/edit reminders) ----
+      let minutesToClose = null;
 
-      // If already closed time passed, don't reminder here (your close automation handles closure)
-      if (msToClose <= 0) continue;
+      if (isOpenPhase) {
+        const closeAtUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_CLOSE_AT]);
+        const msToClose = msUntil(closeAtUnix);
 
-      const minutesToClose = Math.floor(msToClose / 60000);
+        // Skip if no close date or already passed (close automation handles it)
+        if (msToClose === null) continue;
+        if (msToClose <= 0) continue;
 
-      // 2) Public close warnings (anti-clutter)
-      // Stage 1: 60 min
-      // Stage 2: 10 min (optional)
-      const lastStage = Number(oppFields[F.OPP_CLOSE_WARN_STAGE] ?? 0) || 0;
+        minutesToClose = Math.floor(msToClose / 60000);
 
-      if (minutesToClose <= 60 && minutesToClose > 55 && lastStage < 1) {
-        await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 1 });
-      }
-      if (minutesToClose <= 10 && minutesToClose > 5 && lastStage < 2) {
-        await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 2 });
+        // Public close warnings (anti-clutter)
+        const lastStage = Number(oppFields[F.OPP_CLOSE_WARN_STAGE] ?? 0) || 0;
+
+        if (minutesToClose <= 60 && minutesToClose > 55 && lastStage < 1) {
+          await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 1 });
+        }
+        if (minutesToClose <= 10 && minutesToClose > 5 && lastStage < 2) {
+          await postOrReplaceCloseWarning({ oppRecordId: oppId, oppFields, stage: 2 });
+        }
       }
 
       // 3) Load commitments for this opportunity
@@ -1513,14 +1594,8 @@ async function runReminderTick() {
         })
         .all();
 
-      /**
-       * ✅ DEDUPE commitments per user per opportunity.
-       * Reason: user can accidentally create 2 commitment rows (double click / re-join / onboarding restart),
-       * which would cause duplicate reminders + no deletion (because reminder msg id is stored per record).
-       *
-       * We keep ONLY the newest commitment per Discord User ID.
-       */
-      const byUser = new Map(); // discordUserId -> commitment record (newest)
+      // Dedupe: keep newest commitment per user
+      const byUser = new Map();
       for (const c of commitments) {
         const uid = asText(c.fields?.[F.COM_DISCORD_USER_ID]).trim();
         if (!uid) continue;
@@ -1542,11 +1617,7 @@ async function runReminderTick() {
 
       const dedupedCommitments = Array.from(byUser.values());
 
-      /**
-       * OPTIONAL CLEANUP (recommended):
-       * Cancel older duplicate Draft commitments so Airtable stays clean.
-       * This does NOT affect normal flow, it only prevents dead duplicate rows from existing forever.
-       */
+      // Optional cleanup: cancel older duplicate Draft commitments
       for (const c of commitments) {
         const uid = asText(c.fields?.[F.COM_DISCORD_USER_ID]).trim();
         if (!uid) continue;
@@ -1560,153 +1631,167 @@ async function runReminderTick() {
         }
       }
 
-      // Use deduped commitments for reminders
       for (const c of dedupedCommitments) {
         if (sentCount >= MAX_REMINDERS_PER_TICK) break;
 
         const cFields = c.fields || {};
         const st = asText(cFields[F.COM_STATUS]) || "";
 
-        // Ignore cancelled / paid
         if (st === "Cancelled" || st === "Paid" || st === "Deposit Paid") continue;
 
         const state = getReminderState(cFields);
 
-        // ===== A) Draft reminders (joined but never submitted anything) =====
-        if (st === "Draft") {
-          // Determine if they have ANY cart lines at all
-          const lines = await linesTable
-            .select({
-              maxRecords: 1,
-              filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(c.id)}'`,
-            })
-            .firstPage();
-  
-          const hasAnyLines = lines.length > 0;
+        // =========================
+        // A) Draft/Editing reminders (OPEN phase only)
+        // =========================
+        if (isOpenPhase && minutesToClose !== null) {
+          // Draft reminders
+          if (st === "Draft") {
+            const lines = await linesTable
+              .select({
+                maxRecords: 1,
+                filterByFormula: `{${F.LINE_COMMITMENT_RECORD_ID}}='${escapeForFormula(c.id)}'`,
+              })
+              .firstPage();
 
-          const committedAt = asText(cFields[F.COM_COMMITTED_AT]).trim() || asText(cFields["Created At"]).trim();
-          const committedMs = committedAt ? new Date(committedAt).getTime() : null;
-          const minsSinceJoin = committedMs ? Math.floor((Date.now() - committedMs) / 60000) : null;
+            const hasAnyLines = lines.length > 0;
 
-          if (!hasAnyLines && minsSinceJoin !== null && minsSinceJoin >= 60 && !hasStage(state, "draft", 1)) {
-            const res = await sendOrReplaceCommitmentReminderDM({
-              commitmentRecord: c,
-              oppFields,
-              title: "📝 Don’t forget to submit your cart",
-              body:
-                "You joined this bulk, but you haven’t submitted any pairs yet.\n\n" +
-                "Add your sizes and press **Submit** — otherwise your pairs don’t count.",
-              stageKey: "draft",
-              stageValue: 1,
-            });
-            if (res.sent) sentCount++;
-          }
+            const committedAt = asText(cFields[F.COM_COMMITTED_AT]).trim() || asText(cFields["Created At"]).trim();
+            const committedMs = committedAt ? new Date(committedAt).getTime() : null;
+            const minsSinceJoin = committedMs ? Math.floor((Date.now() - committedMs) / 60000) : null;
 
-          // Reminder stage: draft_2 (60 min before close)
-          if (!hasAnyLines && minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "draft", 2)) {
-            const res = await sendOrReplaceCommitmentReminderDM({
-              commitmentRecord: c,
-              oppFields,
-              title: "⏰ Last hour to submit",
-              body:
-                "This bulk is closing soon and you still have **0 submitted pairs**.\n\n" +
-                "If you want to be included, add sizes and press **Submit** now.",
-              stageKey: "draft",
-              stageValue: 2,
-            });
-            if (res.sent) sentCount++;
-          }
-        }
-
-        // ===== B) Editing reminders (added more but didn't submit) =====
-        if (st === "Editing") {
-          const { qtyMap, countedMap } = await getCommitmentLineMaps(c.id);
-          const delta = calcDeltaMap(qtyMap, countedMap);
-          const hasChanges = delta.size > 0;
-
-          if (hasChanges) {
-            const lastAct = asText(cFields[F.COM_LAST_ACTIVITY]).trim();
-            const lastActMs = lastAct ? new Date(lastAct).getTime() : null;
-            const minsSinceAct = lastActMs ? Math.floor((Date.now() - lastActMs) / 60000) : null;
-
-            if (minsSinceAct !== null && minsSinceAct >= 10 && !hasStage(state, "edit", 1)) {
+            if (!hasAnyLines && minsSinceJoin !== null && minsSinceJoin >= 60 && !hasStage(state, "draft", 1)) {
               const res = await sendOrReplaceCommitmentReminderDM({
                 commitmentRecord: c,
                 oppFields,
-                title: "✅ Don’t forget to press Submit",
+                title: "📝 Don’t forget to submit your cart",
                 body:
-                  "You added/edited pairs, but you haven’t pressed **Submit** yet.\n\n" +
-                  "⚠️ **Only submitted pairs count.** Please press **Submit** to lock in your additions.",
-                stageKey: "edit",
+                  "You joined this bulk, but you haven’t submitted any pairs yet.\n\n" +
+                  "Add your sizes and press **Submit** — otherwise your pairs don’t count.",
+                stageKey: "draft",
                 stageValue: 1,
               });
               if (res.sent) sentCount++;
             }
 
-            if (minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "edit", 2)) {
+            if (!hasAnyLines && minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "draft", 2)) {
               const res = await sendOrReplaceCommitmentReminderDM({
                 commitmentRecord: c,
                 oppFields,
-                title: "⏰ Last hour — submit your added pairs",
+                title: "⏰ Last hour to submit",
                 body:
-                  "Bulk closes in ~1 hour.\n\n" +
-                  "If you added more sizes, press **Submit** now — otherwise your added pairs won’t count.",
-                stageKey: "edit",
+                  "This bulk is closing soon and you still have **0 submitted pairs**.\n\n" +
+                  "If you want to be included, add sizes and press **Submit** now.",
+                stageKey: "draft",
                 stageValue: 2,
               });
               if (res.sent) sentCount++;
             }
           }
+
+          // Editing reminders
+          if (st === "Editing") {
+            const { qtyMap, countedMap } = await getCommitmentLineMaps(c.id);
+            const delta = calcDeltaMap(qtyMap, countedMap);
+            const hasChanges = delta.size > 0;
+
+            if (hasChanges) {
+              const lastAct = asText(cFields[F.COM_LAST_ACTIVITY]).trim();
+              const lastActMs = lastAct ? new Date(lastAct).getTime() : null;
+              const minsSinceAct = lastActMs ? Math.floor((Date.now() - lastActMs) / 60000) : null;
+
+              if (minsSinceAct !== null && minsSinceAct >= 10 && !hasStage(state, "edit", 1)) {
+                const res = await sendOrReplaceCommitmentReminderDM({
+                  commitmentRecord: c,
+                  oppFields,
+                  title: "✅ Don’t forget to press Submit",
+                  body:
+                    "You added/edited pairs, but you haven’t pressed **Submit** yet.\n\n" +
+                    "⚠️ **Only submitted pairs count.** Please press **Submit** to lock in your additions.",
+                  stageKey: "edit",
+                  stageValue: 1,
+                });
+                if (res.sent) sentCount++;
+              }
+
+              if (minutesToClose <= 60 && minutesToClose > 55 && !hasStage(state, "edit", 2)) {
+                const res = await sendOrReplaceCommitmentReminderDM({
+                  commitmentRecord: c,
+                  oppFields,
+                  title: "⏰ Last hour — submit your added pairs",
+                  body:
+                    "Bulk closes in ~1 hour.\n\n" +
+                    "If you added more sizes, press **Submit** now — otherwise your added pairs won’t count.",
+                  stageKey: "edit",
+                  stageValue: 2,
+                });
+                if (res.sent) sentCount++;
+              }
+            }
+          }
         }
 
-        // ===== C) Deposit reminders (strict 24h) =====
-        const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
-        const msToDepositDue = msUntil(depositDueUnix);
-        const depositPct = Number(cFields[F.COM_DEPOSIT_PCT] ?? 0);
+        // =========================
+        // C) Deposit reminders (DEPOSIT phase only)
+        // Required by you:
+        // - Opp Status = Closed
+        // - Supplier Quote Status = Confirmed
+        // - Commitment Status = Locked
+        // - Deposit % != 0%
+        // =========================
+        if (isDepositPhase) {
+          const depositDueUnix = toUnixSecondsFromAirtableDate(oppFields[F.OPP_FINALIZED_AT]);
+          const msToDepositDue = msUntil(depositDueUnix);
 
-        if (st === "Locked" && depositPct > 0 && msToDepositDue !== null && msToDepositDue > 0) {
-          const minsToDue = Math.floor(msToDepositDue / 60000);
+          const depositPct = parseDepositPctToNumber(cFields[F.COM_DEPOSIT_PCT]);
 
-          if (minsToDue <= 12 * 60 && minsToDue > 12 * 60 - 10 && !hasStage(state, "dep", 1)) {
-            const res = await sendOrReplaceCommitmentReminderDM({
-              commitmentRecord: c,
-              oppFields,
-              title: "💳 Deposit reminder",
-              body:
-                "Your commitment is locked, but the **deposit is still unpaid**.\n\n" +
-                "Please pay deposit ASAP — unpaid deposits are cancelled at the deadline (zero tolerance).",
-              stageKey: "dep",
-              stageValue: 1,
-            });
-            if (res.sent) sentCount++;
-          }
+          if (st === "Locked" && depositPct > 0 && msToDepositDue !== null && msToDepositDue > 0) {
+            const minsToDue = Math.floor(msToDepositDue / 60000);
 
-          if (minsToDue <= 120 && minsToDue > 110 && !hasStage(state, "dep", 2)) {
-            const res = await sendOrReplaceCommitmentReminderDM({
-              commitmentRecord: c,
-              oppFields,
-              title: "⏰ 2 hours left to pay deposit",
-              body:
-                "Deposit deadline is close.\n\n" +
-                "⚠️ If deposit isn’t paid in time, your commitment will be **cancelled automatically**.",
-              stageKey: "dep",
-              stageValue: 2,
-            });
-            if (res.sent) sentCount++;
-          }
+            // 12h remaining (window: 12h..11h50m)
+            if (minsToDue <= 12 * 60 && minsToDue > 12 * 60 - 10 && !hasStage(state, "dep", 1)) {
+              const res = await sendOrReplaceCommitmentReminderDeal({
+                commitmentRecord: c,
+                oppFields,
+                title: "💳 Deposit reminder",
+                body:
+                  "Deposit is still unpaid.\n\n" +
+                  "⚠️ Unpaid deposits are cancelled at the deadline (zero tolerance).",
+                stageKey: "dep",
+                stageValue: 1,
+              });
+              if (res.sent) sentCount++;
+            }
 
-          if (minsToDue <= 30 && minsToDue > 25 && !hasStage(state, "dep", 3)) {
-            const res = await sendOrReplaceCommitmentReminderDM({
-              commitmentRecord: c,
-              oppFields,
-              title: "🚨 30 minutes left to pay deposit",
-              body:
-                "Final reminder: deposit deadline is in **~30 minutes**.\n\n" +
-                "If deposit is not received, you’ll be left out and cancelled.",
-              stageKey: "dep",
-              stageValue: 3,
-            });
-            if (res.sent) sentCount++;
+            // 2h remaining (window: 2h..1h50m)
+            if (minsToDue <= 120 && minsToDue > 110 && !hasStage(state, "dep", 2)) {
+              const res = await sendOrReplaceCommitmentReminderDeal({
+                commitmentRecord: c,
+                oppFields,
+                title: "⏰ 2 hours left to pay deposit",
+                body:
+                  "Deposit deadline is close.\n\n" +
+                  "⚠️ If deposit isn’t paid in time, your deal will be cancelled.",
+                stageKey: "dep",
+                stageValue: 2,
+              });
+              if (res.sent) sentCount++;
+            }
+
+            // 30m remaining (window: 30m..25m)
+            if (minsToDue <= 30 && minsToDue > 25 && !hasStage(state, "dep", 3)) {
+              const res = await sendOrReplaceCommitmentReminderDeal({
+                commitmentRecord: c,
+                oppFields,
+                title: "🚨 30 minutes left to pay deposit",
+                body:
+                  "Final reminder: your deposit is still unpaid.\n\n" +
+                  "⚠️ If deposit isn’t received in time, your deal will be cancelled.",
+                stageKey: "dep",
+                stageValue: 3,
+              });
+              if (res.sent) sentCount++;
+            }
           }
         }
       }
