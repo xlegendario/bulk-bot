@@ -229,12 +229,13 @@ export function registerGatekeeping(ctx) {
         const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
 
         const dmEmbed = new EmbedBuilder()
+          .setThumbnail("https://i.imgur.com/abc1234.png") // 👈 logo
           .setTitle("✅ You’re on the waitlist")
           .setDescription(
             [
               "Thank you for applying to join **Kickz Caviar Wholesale**", 
-              "\nOur Mission is to help buyers get better prices by buying together, opening access to trusted global suppliers.",
-              "\nMore active, serious buyers mean better pricing for everyone.",
+              "\n**Our mission** is to help buyers get better prices by buying together, opening access to trusted global suppliers.",
+              "\n**More active, serious buyers** mean **better pricing** for everyone.",
               "\n🔗 **Know other serious buyers like you?** Use this invite link:",
               `\n${inviteUrl}`,
               "\nInvite activity is taken into account during approval.",
