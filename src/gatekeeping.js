@@ -211,9 +211,11 @@ export function registerGatekeeping(ctx) {
         ].filter(Boolean).join("\n");
 
         await interaction.user.send(dmText).catch(() => {});
-        }
 
-        await interaction.editReply("✅ You’re on the waitlist. We’ll review requests regularly.").catch(() => {});
+        await interaction
+          .editReply("✅ You’re on the waitlist. We’ll review requests regularly.")
+          .catch(() => {});
+
         return;
       }
     } catch (e) {
