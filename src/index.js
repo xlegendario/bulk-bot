@@ -3248,7 +3248,6 @@ async function buildBulkHistoryEmbed({ oppRecordId, oppFields, currency }) {
     `**Unit Price:** **${unitStr}**`,
     `**Total Price:** **${totalStr}**`,
     `**Final Discount:** **${discount}**`,
-    "",
   ].join(NL);
 
   const embed = new EmbedBuilder()
@@ -3270,7 +3269,8 @@ async function buildBulkHistoryEmbed({ oppRecordId, oppFields, currency }) {
         });
 
         if (ladder) {
-          embed.addFields({ name: "\n📉 Discount ladder (reached)", value: ladder, inline: false });
+          embed.addFields({ name: "", value: "\u200B", inline: false });
+          embed.addFields({ name: "**📉 Discount ladder**", value: ladder, inline: false });
         }
       }
     }
