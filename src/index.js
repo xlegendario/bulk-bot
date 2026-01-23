@@ -3254,6 +3254,15 @@ async function safeDeferReply(interaction, options) {
 client.on(Events.InteractionCreate, async (interaction) => {
   const inGuild = !!interaction.guildId;
 
+  const cid = String(
+    interaction.customId ||
+    interaction?.fields?.customId ||
+    ""
+  );
+
+  // Gatekeeping owns all gk_* interactions
+  if (cid.startsWith("gk_")) return;
+
   // ✅ Auto-defer ONLY for buttons.
   // Never auto-defer modal submits, select menus, etc.
   if (interaction.isButton()) {
