@@ -91,7 +91,7 @@ export function registerGatekeeping(ctx) {
 
     const note = new TextInputBuilder()
       .setCustomId(GK.NOTE)
-      .setLabel("Optional note (optional)")
+      .setLabel("Anything we should know? (optional)")
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(false);
 
