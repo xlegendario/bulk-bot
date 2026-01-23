@@ -3248,6 +3248,7 @@ async function buildBulkHistoryEmbed({ oppRecordId, oppFields, currency }) {
     `**Unit Price:** **${unitStr}**`,
     `**Total Price:** **${totalStr}**`,
     `**Final Discount:** **${discount}**`,
+    "",
   ].join(NL);
 
   const embed = new EmbedBuilder()
