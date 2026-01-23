@@ -3270,7 +3270,7 @@ async function buildBulkHistoryEmbed({ oppRecordId, oppFields, currency }) {
         });
 
         if (ladder) {
-          embed.addFields({ name: "📉 Discount ladder (reached)", value: ladder, inline: false });
+          embed.addFields({ name: "\n📉 Discount ladder (reached)", value: ladder, inline: false });
         }
       }
     }
