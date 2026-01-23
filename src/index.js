@@ -2,6 +2,7 @@
 // Includes: public post+sync, DM cart builder, counted quantity snapshot, tier engine (Rule Sets+Rules),
 // close/finalize with per-buyer deal channels, staff deposit confirm button, supplier quote + confirmed bulks summary.
 import { registerGatekeeping } from "./gatekeeping.js";
+import { registerWelcome } from "./welcome.js";
 import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
@@ -1412,6 +1413,11 @@ const client = new Client({
 registerGatekeeping({
   client,
   base,
+  env: process.env,
+});
+
+registerWelcome({
+  client,
   env: process.env,
 });
 
