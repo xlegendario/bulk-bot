@@ -3222,7 +3222,7 @@ async function postSupplierConfirmedQuoteToSupplierServer({ oppRecordId, oppFiel
   await ch.send({ embeds: [embed] });
 }
 
-function buildBulkHistoryEmbed({ oppFields, currency }) {
+async function buildBulkHistoryEmbed({ oppRecordId, oppFields, currency }) {
   const oppId = asText(oppFields["Opportunity ID"]);
   const bulkId = toBulkId(oppId || "");
 
@@ -3230,8 +3230,7 @@ function buildBulkHistoryEmbed({ oppFields, currency }) {
   const sku = asText(oppFields[F.OPP_SKU_SOFT]) || asText(oppFields[F.OPP_SKU]) || "—";
 
   const finalMap = quoteFieldToMap(oppFields[F.OPP_FINAL_QUOTE]);
-  const totalPairs = Array.from(finalMap.values())
-    .reduce((s, q) => s + (Number(q) || 0), 0);
+  const totalPairs = Array.from(finalMap.values()).reduce((s, q) => s + (Number(q) || 0), 0);
 
   const sellUnit = parseMoneyNumber(oppFields[F.OPP_FINAL_SELL_PRICE]);
   const unitStr = sellUnit == null ? "—" : formatMoney(currency, sellUnit);
@@ -3251,10 +3250,34 @@ function buildBulkHistoryEmbed({ oppFields, currency }) {
     `**Final Discount:** **${discount}**`,
   ].join(NL);
 
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setTitle(`✅ CONFIRMED BULK — ${bulkId}`)
     .setDescription(desc)
     .setColor(0xffd300);
+
+  // ✅ Add ladder (safe, non-breaking)
+  try {
+    const startPrice = Number(asText(oppFields[F.OPP_START_SELL_PRICE]));
+    if (Number.isFinite(startPrice) && startPrice > 0 && oppRecordId) {
+      const tiers = await fetchTiersForOpportunity(oppRecordId).catch(() => []);
+      if (Array.isArray(tiers) && tiers.length) {
+        const ladder = buildDiscountLadderText({
+          tiers,
+          startPrice,
+          currentTotalPairs: totalPairs, // reached volume
+          currency,
+        });
+
+        if (ladder) {
+          embed.addFields({ name: "📉 Discount ladder (reached)", value: ladder, inline: false });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("⚠️ Bulk history ladder failed:", e?.message || e);
+  }
+
+  return embed;
 }
 
 
@@ -5800,7 +5823,7 @@ app.post("/finalize-opportunity", async (req, res) => {
       try {
         const closedCh = await client.channels.fetch(String(CLOSED_BULKS_CHANNEL_ID)).catch(() => null);
         if (closedCh?.isTextBased()) {
-          const embed = buildBulkHistoryEmbed({ oppFields, currency });
+          const embed = await buildBulkHistoryEmbed({ oppRecordId: opportunityRecordId, oppFields, currency });
           await closedCh.send({ embeds: [embed] });
         }
       } catch (e) {
