@@ -229,7 +229,7 @@ export function registerGatekeeping(ctx) {
         const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
 
         const dmEmbed = new EmbedBuilder()
-          .setThumbnail("https://i.imgur.com/abc1234.png") // 👈 logo
+          .setThumbnail("https://imgur.com/a/r3cNptU") // 👈 logo
           .setTitle("✅ You’re on the waitlist")
           .setDescription(
             [
