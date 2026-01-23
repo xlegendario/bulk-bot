@@ -19,7 +19,7 @@ export function registerGatekeeping(ctx) {
     ACCESS_GUILD_ID,
     PENDING_ROLE_ID,
     MEMBER_ROLE_ID,
-    WAITLIST_INVITE_URL = "", // optional, for DM after apply
+    WAITLIST_INVITE_URL = "",
   } = env;
 
   if (!GET_ACCESS_CHANNEL_ID || !PENDING_ROLE_ID || !MEMBER_ROLE_ID) {
@@ -38,6 +38,9 @@ export function registerGatekeeping(ctx) {
     IG: "gk_ig",
     NOTE: "gk_note",
   };
+
+  // ✅ Local readiness flag: while restarting/warming up, don't leave interactions “thinking”
+  let GK_READY = false;
 
   async function ensureGetAccessMessage() {
     const ch = await client.channels.fetch(String(GET_ACCESS_CHANNEL_ID)).catch(() => null);
@@ -110,9 +113,7 @@ export function registerGatekeeping(ctx) {
       const expectedGuildId = String(ACCESS_GUILD_ID || member.guild.id);
       if (String(member.guild.id) !== expectedGuildId) return;
 
-      // If they already have Member (rejoin edge case), don't force Pending
       if (member.roles.cache.has(String(MEMBER_ROLE_ID))) return;
-
       await member.roles.add(String(PENDING_ROLE_ID)).catch(() => {});
     } catch {}
   });
@@ -120,6 +121,35 @@ export function registerGatekeeping(ctx) {
   // Button + modal handling
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
+      const cid = String(interaction.customId || "");
+
+      // Only handle gatekeeping ids in this module
+      const isGatekeeping = cid === GK.APPLY_BTN || cid === GK.APPLY_MODAL || cid.startsWith("gk_");
+      if (!isGatekeeping) return;
+
+      // ✅ If bot just restarted and is not ready yet, respond quickly (no endless "thinking")
+      if (!GK_READY) {
+        // For button interactions, we can reply quickly.
+        if (interaction.isButton()) {
+          await interaction
+            .reply({
+              content: "⚠️ Bot is restarting. Try again in ~10 seconds.",
+              flags: MessageFlags.Ephemeral,
+            })
+            .catch(() => {});
+        }
+        // For modal submits, also reply quickly if possible
+        if (interaction.isModalSubmit()) {
+          await interaction
+            .reply({
+              content: "⚠️ Bot is restarting. Please submit again in ~10 seconds.",
+              flags: MessageFlags.Ephemeral,
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
       // Open modal
       if (interaction.isButton() && interaction.customId === GK.APPLY_BTN) {
         // IMPORTANT: do NOT defer; modals must be shown immediately
@@ -127,7 +157,7 @@ export function registerGatekeeping(ctx) {
         return;
       }
 
-      // Modal submit -> Airtable record
+      // Modal submit -> Airtable record + DM
       if (interaction.isModalSubmit() && interaction.customId === GK.APPLY_MODAL) {
         const user = interaction.user;
 
@@ -135,10 +165,10 @@ export function registerGatekeeping(ctx) {
         const ig = interaction.fields.getTextInputValue(GK.IG)?.trim() || "";
         const note = interaction.fields.getTextInputValue(GK.NOTE)?.trim() || "";
 
-        // ✅ ACK immediately so the interaction never expires (10062)
+        // ✅ ACK immediately so the interaction never expires
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-        // If user is already in server and doesn't have Pending, add it (makes testing easier)
+        // Ensure Pending role if user is already in server (helps testing)
         try {
           const gid = String(ACCESS_GUILD_ID || interaction.guildId || "");
           if (gid) {
@@ -146,15 +176,16 @@ export function registerGatekeeping(ctx) {
             if (guild) {
               const member = await guild.members.fetch(user.id).catch(() => null);
               if (member) {
-                if (!member.roles.cache.has(String(MEMBER_ROLE_ID)) && !member.roles.cache.has(String(PENDING_ROLE_ID))) {
+                if (
+                  !member.roles.cache.has(String(MEMBER_ROLE_ID)) &&
+                  !member.roles.cache.has(String(PENDING_ROLE_ID))
+                ) {
                   await member.roles.add(String(PENDING_ROLE_ID)).catch(() => {});
                 }
               }
             }
           }
         } catch {}
-
-        console.log("GK: submit received from", user.id, user.tag, "country:", country);
 
         // Prevent duplicates: update existing record if user already applied
         const existing = await waitlistTable
@@ -176,8 +207,6 @@ export function registerGatekeeping(ctx) {
           "Note": note,
           "Status": "Pending",
           "Applied At": new Date().toISOString(),
-
-          // Use proper types for Airtable:
           "Discord Role Granted": false,
           "Granted At": null,
         };
@@ -196,9 +225,8 @@ export function registerGatekeeping(ctx) {
           return;
         }
 
-        // ✅ DM the user a confirmation + invite link (optional)
-        const inviteUrl = String(env.WAITLIST_INVITE_URL || "").trim();
-
+        // DM mission + invite link (optional)
+        const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
         const dmText = [
           "✅ **Thanks — you’re on the waitlist.**",
           "",
@@ -208,14 +236,15 @@ export function registerGatekeeping(ctx) {
           "",
           inviteUrl ? `🔗 **Invite link you can share:** ${inviteUrl}` : null,
           "Invite activity may be taken into account when granting access.",
-        ].filter(Boolean).join("\n");
+        ]
+          .filter(Boolean)
+          .join("\n");
 
-        await interaction.user.send(dmText).catch(() => {});
+        await user.send(dmText).catch(() => {});
 
         await interaction
-          .editReply("✅ You’re on the waitlist. We’ll review requests regularly.")
+          .editReply("✅ You’re on the waitlist. Check your DMs for details + invite link.")
           .catch(() => {});
-
         return;
       }
     } catch (e) {
@@ -232,10 +261,7 @@ export function registerGatekeeping(ctx) {
       const rows = await waitlistTable
         .select({
           maxRecords: 200,
-          filterByFormula: `AND(
-            {Status}='Approved',
-            NOT({Discord Role Granted})
-          )`,
+          filterByFormula: `AND({Status}='Approved', NOT({Discord Role Granted}))`,
         })
         .firstPage();
 
@@ -277,7 +303,13 @@ export function registerGatekeeping(ctx) {
 
   client.once(Events.ClientReady, async () => {
     console.log("✅ Gatekeeping ready. Table:", ACCESS_WAITLIST_TABLE);
-    await ensureGetAccessMessage();
+
+    // Mark ready first (so interactions can respond quickly)
+    GK_READY = true;
+
+    // Delay non-critical work slightly so the bot is responsive immediately after deploy
+    setTimeout(() => ensureGetAccessMessage().catch(() => {}), 1500);
+
     setInterval(pollAndGrant, POLL_MS);
     setTimeout(pollAndGrant, 10 * 1000);
   });
