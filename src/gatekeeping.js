@@ -196,19 +196,21 @@ export function registerGatekeeping(ctx) {
           return;
         }
 
-        // Optional DM with invite link + story
-        const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
-        if (inviteUrl) {
-          const dmText = [
-            "✅ **Thanks — you’re on the waitlist.**",
-            "",
-            "Kickz Caviar Bulk is built to give more buyers access to group bulk buying + supplier network opportunities they normally wouldn’t reach alone.",
-            "",
-            `Invite link you can share: ${inviteUrl}`,
-            "Invite activity may be taken into account when granting access.",
-          ].join("\n");
+        // ✅ DM the user a confirmation + invite link (optional)
+        const inviteUrl = String(env.WAITLIST_INVITE_URL || "").trim();
 
-          await user.send(dmText).catch(() => {});
+        const dmText = [
+          "✅ **Thanks — you’re on the waitlist.**",
+          "",
+          "Kickz Caviar Wholesale exists to give more buyers access to **group bulk buying** and a **supplier network** they normally wouldn’t reach alone.",
+          "",
+          "We review requests regularly — you’ll get access as soon as you’re approved.",
+          "",
+          inviteUrl ? `🔗 **Invite link you can share:** ${inviteUrl}` : null,
+          "Invite activity may be taken into account when granting access.",
+        ].filter(Boolean).join("\n");
+
+        await interaction.user.send(dmText).catch(() => {});
         }
 
         await interaction.editReply("✅ You’re on the waitlist. We’ll review requests regularly.").catch(() => {});
