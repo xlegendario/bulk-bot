@@ -3148,6 +3148,29 @@ async function postConfirmedBulksSummary({ guild, oppRecordId, oppFields, curren
     .setDescription(desc)
     .setColor(0xffd300);
 
+  // ✅ Add discount ladder to history (only if tier rules exist + start price is valid)
+  try {
+    const startPrice = Number(asText(oppFields[F.OPP_START_SELL_PRICE]));
+    if (Number.isFinite(startPrice) && startPrice > 0) {
+      const tiers = await fetchTiersForOpportunity(oppRecordId).catch(() => []);
+      if (Array.isArray(tiers) && tiers.length) {
+        // Use FINAL total pairs (from confirmed quote) to mark reached tier
+        const ladder = buildDiscountLadderText({
+          tiers,
+          startPrice,
+          currentTotalPairs: totalPairs, // ✅ uses the totalPairs you already computed from finalMap
+          currency,
+        });
+
+        if (ladder) {
+          embed.addFields({ name: "📉 Discount ladder (reached)", value: ladder, inline: false });
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("⚠️ Could not add ladder to bulk history:", e?.message || e);
+  }
+
   await ch.send({ embeds: [embed] });
 }
 
