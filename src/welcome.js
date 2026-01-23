@@ -19,7 +19,7 @@ export function registerWelcome(ctx) {
       .setDescription(
         [
           "We help buyers get better prices by **buying together** and working directly with **trusted suppliers**.",
-          "Instead of sourcing alone, buyers pool demand — unlocking discounts that usually require large capital or long-standing supplier relationships.",
+          "Instead of sourcing alone, buyers combine demand — unlocking discounts that usually require large capital or long-standing supplier relationships.",
           "",
           "**Why we exist**",
           "Our mission is to make bulk discounts and global supplier access available to **everyone** — ",
@@ -34,6 +34,8 @@ export function registerWelcome(ctx) {
           "• Prices lock when a bulk closes",
           "",
           "**What makes this different**",
+          "• No individual MOQ's, members buy together as a whole",
+          "• Volume discounts are unlocked together",
           "• No blind prepayments",
           "• Clear timelines and rules",
           "• Real supplier relationships",
