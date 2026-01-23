@@ -1325,7 +1325,7 @@ async function ensureRequestBulksMessage() {
 
   const embed = new EmbedBuilder()
     .setTitle("📦 Bulk Requests")
-    .setDescription("Submit a SKU request (SKU + target €/unit + quantity).")
+    .setDescription("Submit a SKU request:\n• SKU\n• target €/unit\n• quantity).")
     .setColor(0xffd300);
 
   const row = new ActionRowBuilder().addComponents(
