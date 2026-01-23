@@ -225,22 +225,29 @@ export function registerGatekeeping(ctx) {
           return;
         }
 
-        // DM mission + invite link (optional)
+        // ✅ DM confirmation as EMBED + invite link
         const inviteUrl = String(WAITLIST_INVITE_URL || "").trim();
-        const dmText = [
-          "✅ **Thanks — you’re on the waitlist.**",
-          "",
-          "Kickz Caviar Wholesale exists to give more buyers access to **group bulk buying** and a **supplier network** they normally wouldn’t reach alone.",
-          "",
-          "We review requests regularly — you’ll get access as soon as you’re approved.",
-          "",
-          inviteUrl ? `🔗 **Invite link you can share:** ${inviteUrl}` : null,
-          "Invite activity may be taken into account when granting access.",
-        ]
-          .filter(Boolean)
-          .join("\n");
 
-        await user.send(dmText).catch(() => {});
+        const dmEmbed = new EmbedBuilder()
+          .setTitle("✅ You’re on the waitlist")
+          .setDescription(
+            [
+              "Kickz Caviar Wholesale helps buyers get better prices by buying together and working directly with trusted suppliers.",
+              "",
+              "More active, serious buyers mean better pricing for everyone.",
+              "",
+              inviteUrl
+                ? `🔗 **Know other serious buyers like you?** Use this invite link:\n${inviteUrl}`
+                : null,
+              "",
+              "Invite activity is taken into account during approval.",
+             ]
+              .filter(Boolean)
+              .join("\n")
+          )
+          .setColor(0xffd300);
+
+        await user.send({ embeds: [dmEmbed] }).catch(() => {});
 
         await interaction
           .editReply("✅ You’re on the waitlist. Check your DMs for details + invite link.")
