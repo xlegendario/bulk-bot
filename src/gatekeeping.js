@@ -232,7 +232,8 @@ export function registerGatekeeping(ctx) {
           .setTitle("✅ You’re on the waitlist")
           .setDescription(
             [
-              "Kickz Caviar Wholesale helps buyers get better prices by buying together and working directly with trusted suppliers.",
+              "Thank you for applying to join **Kickz Caviar Wholesale**", 
+              "\nOur Mission is to help buyers get better prices by buying together, opening access to trusted global suppliers.",
               "\nMore active, serious buyers mean better pricing for everyone.",
               "\n🔗 **Know other serious buyers like you?** Use this invite link:",
               `\n${inviteUrl}`,
