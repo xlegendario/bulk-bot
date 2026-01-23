@@ -233,15 +233,18 @@ export function registerGatekeeping(ctx) {
           .setDescription(
             [
               "Kickz Caviar Wholesale helps buyers get better prices by buying together and working directly with trusted suppliers.",
-              "\n",
+              "",
               "More active, serious buyers mean better pricing for everyone.",
-              "\n",
+              "",
               inviteUrl
-                ? `🔗 **Know other serious buyers like you?**\nUse this invite link:\n${inviteUrl}`
+                ? "🔗 **Know other serious buyers like you?**"
+                : null,
+              inviteUrl
+                ? `Use this invite link:\n${inviteUrl}`
                 : null,
               "",
               "Invite activity is taken into account during approval.",
-             ]
+            ]
               .filter(Boolean)
               .join("\n")
           )
