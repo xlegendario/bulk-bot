@@ -57,7 +57,7 @@ export function registerGatekeeping(ctx) {
           "After joining the waitlist, you’ll receive an invite link by DM.",
           "Inviting other serious buyers improves pricing and is taken into account during approval.",
           "",
-          "Click **Join Waitlist** below to request access.**",
+          "Click **Join Waitlist** below to request access.",
         ].join("\n")
       )
       .setColor(0xffd300);
