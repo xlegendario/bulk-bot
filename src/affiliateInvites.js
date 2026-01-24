@@ -128,6 +128,25 @@ export function registerAffiliateInvites(ctx) {
     }
   }
 
+  async function findMemberRecordByInviteCode(inviteCode) {
+    const code = String(inviteCode || "").trim();
+    if (!code) return null;
+
+    const rows = await membersTable
+      .select({
+        maxRecords: 1,
+        filterByFormula: `{Invite Code}='${escapeAirtableValue(code)}'`,
+      })
+      .firstPage()
+      .catch((e) => {
+        console.error("AI: Airtable select by Invite Code failed:", e);
+        return [];
+      });
+
+    return rows?.[0] || null;
+  }
+
+
   // ---------- Affiliate message ----------
   async function ensureAffiliateMessage() {
     const ch = await client.channels.fetch(String(AFFILIATE_CHANNEL_ID)).catch(() => null);
@@ -362,24 +381,24 @@ export function registerAffiliateInvites(ctx) {
 
       if (!usedInvite || !usedInvite.inviter?.id || bestDelta <= 0) return;
 
-      // ✅ Skip bot inviters (prevents bot becoming an inviter/member + prevents bot leaderboard)
-      if (usedInvite.inviter?.bot || usedInvite.inviter?.id === client.user.id) {
-        console.log("AI JOIN: inviter is bot, skipping attribution/log.");
+      // For button-generated personal invites, the Discord "inviter" is the bot.
+      // We must map invite code -> affiliate owner from Airtable.
+      const ownerRec = await findMemberRecordByInviteCode(usedInvite.code);
+
+      if (!ownerRec) {
+        console.log("AI JOIN: No owner found in Airtable for invite code", usedInvite.code, "-> skipping");
         return;
       }
 
-      const inviterId = normId(usedInvite.inviter.id);
+      const inviterId = normId(ownerRec.fields?.["Discord User ID"]);
+      if (!inviterId) {
+        console.log("AI JOIN: Owner record missing Discord User ID for invite code", usedInvite.code);
+        return;
+      }
       const inviteeId = normId(member.user.id);
 
-      // Ensure inviter exists in members table
-      const inviterMemberRec = await upsertMember(
-        inviterId,
-        usedInvite.inviter.tag || usedInvite.inviter.username || "",
-        {}
-      ).catch((e) => {
-        console.error("AI JOIN: upsertMember(inviter) failed:", e);
-        return null;
-      });
+      // Inviter already exists: it's the owner of this invite code in Airtable
+      const inviterMemberRec = ownerRec;
 
       // Update invitee fields ONLY if empty (never overwrite)
       const inviteeRec = await findMemberRecordByDiscordId(inviteeId);
