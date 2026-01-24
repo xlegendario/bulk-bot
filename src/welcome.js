@@ -48,7 +48,7 @@ export function registerWelcome(ctx) {
           "**Request a bulk**",
           "Looking for a specific SKU or model?",
           "You can request new bulk opportunities in **<#1460674030213533726>**.",
-          "Requests are reviewed with our supplier network."
+          "Requests are reviewed with our supplier network.",
           "If supplier terms and group demand match, the opportunity is posted publicly.",
           "",
           "**Get started**",
