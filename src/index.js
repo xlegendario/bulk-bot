@@ -3,6 +3,7 @@
 // close/finalize with per-buyer deal channels, staff deposit confirm button, supplier quote + confirmed bulks summary.
 import { registerGatekeeping } from "./gatekeeping.js";
 import { registerWelcome } from "./welcome.js";
+import { registerAffiliateInvites } from "./affiliateInvites.js";
 import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
@@ -1418,6 +1419,12 @@ registerGatekeeping({
 
 registerWelcome({
   client,
+  env: process.env,
+});
+
+registerAffiliateInvites({
+  client,
+  base,
   env: process.env,
 });
 
