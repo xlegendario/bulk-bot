@@ -52,10 +52,12 @@ export function registerGatekeeping(ctx) {
         [
           "Access to this server is granted via a waitlist.",
           "",
-          "Click **Join Waitlist** below to request access.",
-          "Requests are reviewed regularly.",
+          "Requests are reviewed regularly and prioritized for active accounts.",
           "",
-          "*Invite activity may be taken into account when granting access.*",
+          "After joining the waitlist, you’ll receive an invite link by DM.",
+          "Inviting other serious buyers improves pricing and is taken into account during approval.",
+          "",
+          "Click **Join Waitlist** below to request access.**",
         ].join("\n")
       )
       .setColor(0xffd300);
