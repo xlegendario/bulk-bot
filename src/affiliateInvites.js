@@ -11,31 +11,40 @@ import {
  * Affiliate Invites Module
  *
  * Airtable tables expected:
- * - Discord Members:
- *    - Discord User ID (primary)
- *    - Discord Username
- *    - Invite Code
- *    - Invite URL
- *    - Invite Created At (date)
- *    - Joined At (date)
- *    - Invited By Discord User ID
- *    - Invite Code Used
  *
- * - Invites Log:
- *    - Invitee Discord User ID
- *    - Inviter Discord User ID
- *    - Invite Code Used
- *    - Joined At (date)
- *    - Month Key (formula)
+ * Discord Members fields:
+ * - Discord User ID (primary OR a normal text field; must exist exactly with this name)
+ * - Discord Username
+ * - Invite Code
+ * - Invite URL
+ * - Invite Created At (date)
+ * - Joined At (date)
+ * - Invited By Discord User ID
+ * - Invite Code Used
+ * - (optional) Invited By Member (LINK to Discord Members)
+ *
+ * Invites Log fields:
+ * - Invitee Discord User ID
+ * - Inviter Discord User ID
+ * - Invite Code Used
+ * - Joined At (date)
+ * - Month Key (formula)
+ * - (optional) Invitee (LINK to Discord Members)
+ * - (optional) Inviter (LINK to Discord Members)
  */
 export function registerAffiliateInvites(ctx) {
   const { client, base, env } = ctx;
 
   const {
     AFFILIATE_CHANNEL_ID,
-    AFFILIATE_GUILD_ID, // optional but recommended once stable
+    AFFILIATE_GUILD_ID, // recommended once stable
     AIRTABLE_MEMBERS_TABLE = "Discord Members",
     AIRTABLE_INVITES_LOG_TABLE = "Invites Log",
+
+    // Optional link field names (only used if they exist)
+    AIRTABLE_MEMBERS_LINK_INVITED_BY = "Invited By Member",
+    AIRTABLE_INVITES_LINK_INVITEE = "Invitee",
+    AIRTABLE_INVITES_LINK_INVITER = "Inviter",
   } = env;
 
   if (!AFFILIATE_CHANNEL_ID) {
@@ -46,9 +55,7 @@ export function registerAffiliateInvites(ctx) {
   const membersTable = base(AIRTABLE_MEMBERS_TABLE);
   const invitesLogTable = base(AIRTABLE_INVITES_LOG_TABLE);
 
-  const AI = {
-    BTN_GET: "aff_get_invite",
-  };
+  const AI = { BTN_GET: "aff_get_invite" };
 
   // Map<guildId, Map<inviteCode, usesNumber>>
   const inviteCache = new Map();
@@ -57,6 +64,10 @@ export function registerAffiliateInvites(ctx) {
   // ---------- Helpers ----------
   function escapeAirtableValue(v) {
     return String(v || "").replace(/'/g, "\\'");
+  }
+
+  function normId(v) {
+    return String(v || "").trim();
   }
 
   function guildAllowed(guildId) {
@@ -72,10 +83,11 @@ export function registerAffiliateInvites(ctx) {
 
   // ---------- Airtable helpers ----------
   async function findMemberRecordByDiscordId(discordId) {
+    const id = normId(discordId);
     const rows = await membersTable
       .select({
         maxRecords: 1,
-        filterByFormula: `{Discord User ID}='${escapeAirtableValue(discordId)}'`,
+        filterByFormula: `{Discord User ID}='${escapeAirtableValue(id)}'`,
       })
       .firstPage()
       .catch((e) => {
@@ -87,10 +99,11 @@ export function registerAffiliateInvites(ctx) {
   }
 
   async function upsertMember(discordId, username, fields = {}) {
-    const existing = await findMemberRecordByDiscordId(discordId);
+    const id = normId(discordId);
+    const existing = await findMemberRecordByDiscordId(id);
 
     const payload = {
-      "Discord User ID": String(discordId),
+      "Discord User ID": id,
       "Discord Username": String(username || ""),
       ...fields,
     };
@@ -99,25 +112,15 @@ export function registerAffiliateInvites(ctx) {
     return await membersTable.create(payload);
   }
 
-  // ---------- Discord invite cache ----------
   async function refreshInviteCacheForGuild(guild) {
     try {
       const invites = await guild.invites.fetch(); // Collection<code, Invite>
-
       const snapshot = new Map();
       for (const [code, inv] of invites) {
         snapshot.set(code, Number(inv.uses || 0));
       }
-
       inviteCache.set(guild.id, snapshot);
-
-      console.log(
-        "AI: invite cache refreshed for guild",
-        guild.id,
-        "count:",
-        snapshot.size
-      );
-
+      console.log("AI: invite cache refreshed for guild", guild.id, "count:", snapshot.size);
       return true;
     } catch (e) {
       console.error("AI: invite fetch failed:", e);
@@ -154,11 +157,8 @@ export function registerAffiliateInvites(ctx) {
       (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === "🤝 Affiliate Program"
     );
 
-    if (existing) {
-      await existing.edit({ embeds: [embed], components: [row] }).catch(() => {});
-    } else {
-      await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
-    }
+    if (existing) await existing.edit({ embeds: [embed], components: [row] }).catch(() => {});
+    else await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
   }
 
   // ---------- Create or reuse personal invite ----------
@@ -166,7 +166,6 @@ export function registerAffiliateInvites(ctx) {
     const existing = await findMemberRecordByDiscordId(user.id);
     const existingUrl = existing?.fields?.["Invite URL"];
     if (existingUrl) {
-      // keep cache fresh
       await refreshInviteCacheForGuild(guild);
       return { url: existingUrl, code: existing?.fields?.["Invite Code"] || "" };
     }
@@ -187,7 +186,7 @@ export function registerAffiliateInvites(ctx) {
       "Invite Created At": new Date().toISOString(),
     });
 
-    // ✅ Critical: seed/refresh cache immediately so baseline contains the new code
+    // Seed cache with the new invite code
     await refreshInviteCacheForGuild(guild);
 
     return { url: invite.url, code: invite.code };
@@ -198,7 +197,6 @@ export function registerAffiliateInvites(ctx) {
     try {
       await ensureAffiliateMessage();
 
-      // Pre-cache invites (important for diff logic)
       if (AFFILIATE_GUILD_ID) {
         const g = await client.guilds.fetch(String(AFFILIATE_GUILD_ID)).catch(() => null);
         if (g) await refreshInviteCacheForGuild(g);
@@ -208,7 +206,7 @@ export function registerAffiliateInvites(ctx) {
         }
       }
 
-      // Optional periodic refresh (helps stability)
+      // Periodic refresh helps stability
       setInterval(async () => {
         try {
           if (!AFFILIATE_GUILD_ID) return;
@@ -307,30 +305,30 @@ export function registerAffiliateInvites(ctx) {
       console.log("AI JOIN: fired", member.user.id, member.user.tag, "guild", guild.id);
 
       // Always log member join in Members table
-      await upsertMember(member.user.id, member.user.tag, {
+      const inviteeMemberRec = await upsertMember(member.user.id, member.user.tag, {
         "Joined At": new Date().toISOString(),
-      }).catch((e) => console.error("AI JOIN: upsertMember(join) failed:", e));
+      }).catch((e) => {
+        console.error("AI JOIN: upsertMember(join) failed:", e);
+        return null;
+      });
 
-      // 1) OLD snapshot (code -> uses)
+      // OLD snapshot (code -> uses)
       const oldUses = inviteCache.get(guild.id);
       console.log("AI JOIN: old snapshot?", !!oldUses, "size:", oldUses?.size ?? null);
 
-      // 2) NEW fetch
+      // NEW fetch
       const newInvites = await guild.invites.fetch().catch((e) => {
         console.error("AI JOIN: guild.invites.fetch failed", e);
         return null;
       });
       console.log("AI JOIN: newInvites?", !!newInvites, "size:", newInvites?.size ?? null);
-
       if (!newInvites) return;
 
-      // Build NEW snapshot (code -> uses)
+      // NEW snapshot
       const newUses = new Map();
       for (const [code, inv] of newInvites) {
         newUses.set(code, Number(inv.uses || 0));
       }
-
-      // Update cache immediately for next joins
       inviteCache.set(guild.id, newUses);
 
       if (!oldUses) {
@@ -338,12 +336,12 @@ export function registerAffiliateInvites(ctx) {
         return;
       }
 
-      // 3) Find the invite code that increased the most
+      // Find the invite code that increased the most
       let usedInvite = null;
       let bestDelta = 0;
 
-      for (const [code, inv] of newInvites) {
-        const oldU = Number(oldUses.get(code) || 0);
+      for (const [, inv] of newInvites) {
+        const oldU = Number(oldUses.get(inv.code) || 0);
         const newU = Number(inv.uses || 0);
         const delta = newU - oldU;
 
@@ -354,48 +352,73 @@ export function registerAffiliateInvites(ctx) {
       }
 
       console.log(
-        "AI JOIN: usedInvite",
+        "AI JOIN: delta best",
+        bestDelta,
+        "usedInvite",
         usedInvite?.code ?? null,
         "inviter",
         usedInvite?.inviter?.id ?? null
       );
 
-      if (!usedInvite || !usedInvite.inviter?.id || bestDelta <= 0) {
-        // Vanity URL / unknown join method / no increment detected
+      if (!usedInvite || !usedInvite.inviter?.id || bestDelta <= 0) return;
+
+      // ✅ Skip bot inviters (prevents bot becoming an inviter/member + prevents bot leaderboard)
+      if (usedInvite.inviter?.bot || usedInvite.inviter?.id === client.user.id) {
+        console.log("AI JOIN: inviter is bot, skipping attribution/log.");
         return;
       }
 
-      const inviterId = usedInvite.inviter.id;
-      const inviteeId = member.user.id;
+      const inviterId = normId(usedInvite.inviter.id);
+      const inviteeId = normId(member.user.id);
 
-      // Ensure inviter exists
-      await upsertMember(
+      // Ensure inviter exists in members table
+      const inviterMemberRec = await upsertMember(
         inviterId,
         usedInvite.inviter.tag || usedInvite.inviter.username || "",
         {}
-      ).catch((e) => console.error("AI JOIN: upsertMember(inviter) failed:", e));
+      ).catch((e) => {
+        console.error("AI JOIN: upsertMember(inviter) failed:", e);
+        return null;
+      });
 
-      // Update invitee inviter info ONLY if empty
+      // Update invitee fields ONLY if empty (never overwrite)
       const inviteeRec = await findMemberRecordByDiscordId(inviteeId);
       const already = inviteeRec?.fields?.["Invited By Discord User ID"];
       if (inviteeRec && !already) {
-        await membersTable
-          .update(inviteeRec.id, {
-            "Invited By Discord User ID": inviterId,
-            "Invite Code Used": usedInvite.code,
-          })
-          .catch((e) => console.error("AI JOIN: update invitee inviter fields failed:", e));
+        const updatePayload = {
+          "Invited By Discord User ID": inviterId,
+          "Invite Code Used": usedInvite.code,
+        };
+
+        // Optional linked field in Discord Members: Invited By Member (link -> Discord Members)
+        if (inviterMemberRec?.id && AIRTABLE_MEMBERS_LINK_INVITED_BY) {
+          updatePayload[AIRTABLE_MEMBERS_LINK_INVITED_BY] = [inviterMemberRec.id];
+        }
+
+        await membersTable.update(inviteeRec.id, updatePayload).catch((e) => {
+          console.error("AI JOIN: update invitee inviter fields failed:", e);
+        });
       }
 
-      // Leaderboard record
-      await invitesLogTable
-        .create({
-          "Invitee Discord User ID": inviteeId,
-          "Inviter Discord User ID": inviterId,
-          "Invite Code Used": usedInvite.code,
-          "Joined At": new Date().toISOString(),
-        })
-        .catch((e) => console.error("AI JOIN: Invites Log create failed:", e));
+      // Create Invites Log row (leaderboard source of truth)
+      const logPayload = {
+        "Invitee Discord User ID": inviteeId,
+        "Inviter Discord User ID": inviterId,
+        "Invite Code Used": usedInvite.code,
+        "Joined At": new Date().toISOString(),
+      };
+
+      // Optional linked fields in Invites Log
+      if (inviteeMemberRec?.id && AIRTABLE_INVITES_LINK_INVITEE) {
+        logPayload[AIRTABLE_INVITES_LINK_INVITEE] = [inviteeMemberRec.id];
+      }
+      if (inviterMemberRec?.id && AIRTABLE_INVITES_LINK_INVITER) {
+        logPayload[AIRTABLE_INVITES_LINK_INVITER] = [inviterMemberRec.id];
+      }
+
+      await invitesLogTable.create(logPayload).catch((e) => {
+        console.error("AI JOIN: Invites Log create failed:", e);
+      });
 
       console.log("AI JOIN: ✅ logged invite -> Inviter:", inviterId, "Invitee:", inviteeId);
     } catch (e) {
