@@ -56,6 +56,7 @@ export function registerGatekeeping(ctx) {
           "Requests are reviewed regularly and prioritized for active accounts.",
           "",
           "**After joining the waitlist, you’ll receive an invite link by DM.**",
+          "",
           "Inviting others is taken into account during approval.",
           "",
           "*Leverage comes from buying together.*",
