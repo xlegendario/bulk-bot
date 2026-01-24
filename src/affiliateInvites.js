@@ -50,7 +50,7 @@ export function registerAffiliateInvites(ctx) {
     BTN_GET: "aff_get_invite",
   };
 
-  // Map<guildId, Collection<code, Invite>>
+  // Map<guildId, Map<inviteCode, usesNumber>>
   const inviteCache = new Map();
   let AI_READY = false;
 
@@ -102,15 +102,25 @@ export function registerAffiliateInvites(ctx) {
   // ---------- Discord invite cache ----------
   async function refreshInviteCacheForGuild(guild) {
     try {
-      const invites = await guild.invites.fetch(); // needs Manage Server permission
-      inviteCache.set(guild.id, invites);
-      console.log("AI: invite cache refreshed for guild", guild.id, "count:", invites.size);
+      const invites = await guild.invites.fetch(); // Collection<code, Invite>
+
+      const snapshot = new Map();
+      for (const [code, inv] of invites) {
+        snapshot.set(code, Number(inv.uses || 0));
+      }
+
+      inviteCache.set(guild.id, snapshot);
+
+      console.log(
+        "AI: invite cache refreshed for guild",
+        guild.id,
+        "count:",
+        snapshot.size
+      );
+
       return true;
     } catch (e) {
-      console.error(
-        "AI: invite fetch failed. Even if bot is admin, ensure it can fetch invites. (Manage Server / permissions)",
-        e
-      );
+      console.error("AI: invite fetch failed:", e);
       return false;
     }
   }
@@ -301,38 +311,57 @@ export function registerAffiliateInvites(ctx) {
         "Joined At": new Date().toISOString(),
       }).catch((e) => console.error("AI JOIN: upsertMember(join) failed:", e));
 
-      // Baseline snapshot
-      const oldInvites = inviteCache.get(guild.id);
-      console.log("AI JOIN: oldInvites?", !!oldInvites, "size:", oldInvites?.size ?? null);
+      // 1) OLD snapshot (code -> uses)
+      const oldUses = inviteCache.get(guild.id);
+      console.log("AI JOIN: old snapshot?", !!oldUses, "size:", oldUses?.size ?? null);
 
-      // New snapshot
+      // 2) NEW fetch
       const newInvites = await guild.invites.fetch().catch((e) => {
-        console.error("AI JOIN: guild.invites.fetch failed (permission?)", e);
+        console.error("AI JOIN: guild.invites.fetch failed", e);
         return null;
       });
       console.log("AI JOIN: newInvites?", !!newInvites, "size:", newInvites?.size ?? null);
 
       if (!newInvites) return;
 
-      // Update cache AFTER keeping old snapshot
-      inviteCache.set(guild.id, newInvites);
+      // Build NEW snapshot (code -> uses)
+      const newUses = new Map();
+      for (const [code, inv] of newInvites) {
+        newUses.set(code, Number(inv.uses || 0));
+      }
 
-      // If no baseline yet, cannot attribute THIS join
-      if (!oldInvites) {
-        console.log("AI JOIN: no baseline cache yet -> cannot attribute this join. (Next joins will work.)");
+      // Update cache immediately for next joins
+      inviteCache.set(guild.id, newUses);
+
+      if (!oldUses) {
+        console.log("AI JOIN: no baseline snapshot yet -> cannot attribute this join (next will work).");
         return;
       }
 
-      // Detect invite use increment
-      const usedInvite = newInvites.find((inv) => {
-        const old = oldInvites.get(inv.code);
-        return old && (inv.uses || 0) > (old.uses || 0);
-      });
+      // 3) Find the invite code that increased the most
+      let usedInvite = null;
+      let bestDelta = 0;
 
-      console.log("AI JOIN: usedInvite", usedInvite?.code ?? null, "inviter", usedInvite?.inviter?.id ?? null);
+      for (const [code, inv] of newInvites) {
+        const oldU = Number(oldUses.get(code) || 0);
+        const newU = Number(inv.uses || 0);
+        const delta = newU - oldU;
 
-      if (!usedInvite || !usedInvite.inviter?.id) {
-        // vanity URL or unknown method
+        if (delta > bestDelta) {
+          bestDelta = delta;
+          usedInvite = inv;
+        }
+      }
+
+      console.log(
+        "AI JOIN: usedInvite",
+        usedInvite?.code ?? null,
+        "inviter",
+        usedInvite?.inviter?.id ?? null
+      );
+
+      if (!usedInvite || !usedInvite.inviter?.id || bestDelta <= 0) {
+        // Vanity URL / unknown join method / no increment detected
         return;
       }
 
