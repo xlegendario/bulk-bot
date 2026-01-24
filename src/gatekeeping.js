@@ -47,15 +47,18 @@ export function registerGatekeeping(ctx) {
     if (!ch || !ch.isTextBased()) return;
 
     const embed = new EmbedBuilder()
+      .setThumbnail("https://i.imgur.com/FeMBxmk.png") // KC logo
       .setTitle("🔒 Join the Waitlist")
       .setDescription(
         [
-          "Access to this server is granted via a waitlist.",
+          "Access to this server is granted through a waitlist.",
           "",
           "Requests are reviewed regularly and prioritized for active accounts.",
           "",
           "**After joining the waitlist, you’ll receive an invite link by DM.**",
           "Inviting others is taken into account during approval.",
+          "",
+          "*Leverage comes from buying together.*",
           "",
           "Click **Join Waitlist** below to request access.",
         ].join("\n")
