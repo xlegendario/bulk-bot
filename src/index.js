@@ -1542,7 +1542,7 @@ client.once(Events.ClientReady, async (c) => {
   await ensureInitiateQuoteMessagesForSuppliers();
 
   // 🔁 ONE-TIME BACKFILL (RUN ONCE, THEN REMOVE)
-  await backfillDiscordMembers(ctx);
+  await backfillDiscordMembers({ client, base, env: process.env });
 
   // Start reminders
   setInterval(() => runReminderTick(), REMINDER_TICK_MS);
