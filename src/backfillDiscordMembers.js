@@ -29,6 +29,7 @@ export async function backfillDiscordMembers(ctx) {
     await membersTable.create({
       "Discord User ID": discordId,
       "Discord Username": m.user.tag,
+      "Joined At": m.joinedAt ? m.joinedAt.toISOString() : null,
     });
 
     console.log("➕ Backfilled:", m.user.tag);
