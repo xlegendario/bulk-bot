@@ -166,16 +166,28 @@ export function registerLeaderboards(ctx) {
       const user = await client.users.fetch(inviterId).catch(() => null);
       if (!user) continue;
 
-      const msg =
-        `💰 **Affiliate Summary — ${monthKey}**\n\n` +
-        `You earned **€${eur}** from **${q} qualified referrals**.\n\n` +
-        `Thanks for helping grow Kickz Caviar 🤝`;
+      const embed = new EmbedBuilder()
+        .setTitle(`💰 Affiliate Summary — ${monthKey}`)
+        .setDescription(
+          [
+            `You earned **€${eur}** this month.`,
+            "",
+            `✅ **${q}** invited members completed their **first deal**.`,
+            "",
+            "Thanks for helping grow **Kickz Caviar** 🤝",
+          ].join("\n")
+        )
+        .setColor(0xffd300)
+        .setFooter({ text: "Kickz Caviar Affiliate Program" })
+        .setTimestamp();
 
-      const sentOk = await user.send(msg).then(() => true).catch((e) => {
-        console.error("LB: DM failed (DMs closed?)", inviterId, e?.message || e);
-        return false;
-      });
-  
+      const sentOk = await user.send({ embeds: [embed] })
+        .then(() => true)
+        .catch((e) => {
+          console.error("LB: DM failed (DMs closed?)", inviterId, e?.message || e);
+          return false;
+        });
+
       if (sentOk) {
         await membersTable.update(memberRec.id, {
           "Last Earnings DM Month": monthKey,
