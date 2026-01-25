@@ -332,7 +332,7 @@ export function registerLeaderboards(ctx) {
         const prevData = await buildLeaderboardsForMonth(prev);
         const finalEmbed = await renderFinalMonthEmbed(prev, prevData.inviteLines, prevData.earnLines);
         await postWinnersIfNotPosted(winnersChannel, prev, finalEmbed); 
-        await sendMonthlyEarningsDMs(prev);
+        await sendMonthlyEarningsDMs("2026-01");
       }
 
       currentMonth = nowMonth;
