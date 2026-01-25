@@ -5,6 +5,7 @@ import { registerGatekeeping } from "./gatekeeping.js";
 import { registerWelcome } from "./welcome.js";
 import { registerAffiliateInvites } from "./affiliateInvites.js";
 import { registerLeaderboards } from "./leaderboards.js";
+import { backfillDiscordMembers } from "./backfillDiscordMembers.js";
 import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
@@ -1536,8 +1537,12 @@ BaseInteraction.prototype.followUp = async function (options) {
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`🤖 Logged in as ${c.user.tag}`);
+
   await ensureRequestBulksMessage();
   await ensureInitiateQuoteMessagesForSuppliers();
+
+  // 🔁 ONE-TIME BACKFILL (RUN ONCE, THEN REMOVE)
+  await backfillDiscordMembers(ctx);
 
   // Start reminders
   setInterval(() => runReminderTick(), REMINDER_TICK_MS);
