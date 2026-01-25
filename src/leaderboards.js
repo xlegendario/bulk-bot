@@ -332,7 +332,6 @@ export function registerLeaderboards(ctx) {
         const prevData = await buildLeaderboardsForMonth(prev);
         const finalEmbed = await renderFinalMonthEmbed(prev, prevData.inviteLines, prevData.earnLines);
         await postWinnersIfNotPosted(winnersChannel, prev, finalEmbed); 
-        await sendMonthlyEarningsDMs("2026-01");
       }
 
       currentMonth = nowMonth;
@@ -352,7 +351,11 @@ export function registerLeaderboards(ctx) {
 
   client.once(Events.ClientReady, async () => {
     console.log("✅ Leaderboards module ready.");
-    // Run immediately, then every 10 minutes
+
+    console.log("TEST: calling sendMonthlyEarningsDMs(2026-01)");
+    await sendMonthlyEarningsDMs("2026-01");
+    console.log("TEST: done sendMonthlyEarningsDMs");
+
     await tick();
     setInterval(tick, 10 * 60 * 1000);
   });
