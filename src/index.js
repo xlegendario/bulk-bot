@@ -5,7 +5,6 @@ import { registerGatekeeping } from "./gatekeeping.js";
 import { registerWelcome } from "./welcome.js";
 import { registerAffiliateInvites } from "./affiliateInvites.js";
 import { registerLeaderboards } from "./leaderboards.js";
-import { backfillDiscordMembers } from "./backfillDiscordMembers.js";
 import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
@@ -1540,9 +1539,6 @@ client.once(Events.ClientReady, async (c) => {
 
   await ensureRequestBulksMessage();
   await ensureInitiateQuoteMessagesForSuppliers();
-
-  // 🔁 ONE-TIME BACKFILL (RUN ONCE, THEN REMOVE)
-  await backfillDiscordMembers({ client, base, env: process.env });
 
   // Start reminders
   setInterval(() => runReminderTick(), REMINDER_TICK_MS);
