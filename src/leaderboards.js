@@ -142,24 +142,17 @@ export function registerLeaderboards(ctx) {
     return { inviteLines, earnLines, monthKey };
   }
 
-  async function findOrCreatePinnedLeaderboardMessage(channel) {
-    // Find an existing bot message we can reuse (search last 50)
-    const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+  async function findOrCreateLeaderboardMessage(channel) {
+    const recent = await channel.messages.fetch({ limit: 10 }).catch(() => null);
     const existing = recent?.find(
       (m) =>
         m.author?.id === client.user.id &&
         m.embeds?.[0]?.title?.startsWith("🏆 LEADERBOARD —")
     );
 
-    if (existing) {
-      // ensure pinned
-      if (!existing.pinned) await existing.pin().catch(() => {});
-      return existing;
-    }
+    if (existing) return existing;
 
-    const msg = await channel.send({ content: "🏆 Leaderboard is initializing..." });
-    await msg.pin().catch(() => {});
-    return msg;
+    return await channel.send({ content: "🏆 Leaderboard is initializing..." });
   }
 
   async function postWinnersIfNotPosted(winnersChannel, monthKey, embed) {
@@ -193,7 +186,12 @@ export function registerLeaderboards(ctx) {
       .setTitle(`🏆 LEADERBOARD — ${monthKey}`)
       .setDescription(`Last updated: **${lastUpdated}** (Amsterdam)`)
       .addFields(
+        { name: "\u200B", value: "\u200B" }, // space after timestamp
+
         { name: "🔥 Top Inviters (This Month)", value: inviteLines.join("\n") },
+
+        { name: "\u200B", value: "\u200B" }, // space between leaderboards
+
         { name: `💰 Top Earners (€${FEE} per Qualified)`, value: earnLines.join("\n") }
       );
   }
@@ -203,7 +201,12 @@ export function registerLeaderboards(ctx) {
       .setTitle(`🏁 FINAL RESULTS — ${monthKey}`)
       .setDescription("Locked standings (final).")
       .addFields(
+        { name: "\u200B", value: "\u200B" },
+
         { name: "🔥 Top Inviters", value: inviteLines.join("\n") },
+
+        { name: "\u200B", value: "\u200B" },
+
         { name: `💰 Top Earners (€${FEE} per Qualified)`, value: earnLines.join("\n") }
       );
   }
