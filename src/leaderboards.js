@@ -130,7 +130,86 @@ export function registerLeaderboards(ctx) {
       }
     }
 
-    
+    async function getMemberRecordByDiscordId(discordId) {
+      const id = normId(discordId);
+      const rows = await membersTable
+        .select({
+          maxRecords: 1,
+          filterByFormula: `{Discord User ID}='${escapeAirtableValue(id)}'`,
+          fields: ["Discord User ID", "Discord Username", "Last Earnings DM Month"],
+        })
+        .firstPage()
+        .catch(() => []);
+
+      return rows?.[0] || null;
+    }
+
+    async function sendMonthlyEarningsDMs(monthKey) {
+      // monthKey is like "2026-01" (the month we are paying/announcing)
+
+      // 1) Get qualified referrals per inviter for that month
+      const rows = await invitesLogTable
+        .select({
+          filterByFormula: `AND(
+            {Month Key}='${escapeAirtableValue(monthKey)}',
+            {${escapeAirtableValue(REFERRAL_QUALIFIED_FIELD)}}=TRUE()
+          )`,
+          fields: ["Inviter Discord User ID"],
+          pageSize: 100,
+        })
+        .all()
+        .catch((e) => {
+          console.error("LB: fetch qualified rows failed:", e);
+          return [];
+        });
+
+      // Count qualified per inviter
+      const qualifiedCounts = new Map();
+      for (const r of rows) {
+        const inviterId = normId(r.fields?.["Inviter Discord User ID"]);
+        if (!inviterId) continue;
+        qualifiedCounts.set(inviterId, (qualifiedCounts.get(inviterId) || 0) + 1);
+      }
+
+      // 2) DM each inviter once (use Discord Members field as “sent marker”)
+      for (const [inviterId, q] of qualifiedCounts.entries()) {
+        if (!q || q <= 0) continue;
+
+        const memberRec = await getMemberRecordByDiscordId(inviterId);
+        if (!memberRec) continue;
+
+        const alreadyMonth = memberRec.fields?.["Last Earnings DM Month"];
+        if (alreadyMonth === monthKey) {
+          // Already notified for this month
+          continue;
+        }
+
+        const eur = q * FEE;
+        const username = memberRec.fields?.["Discord Username"] || inviterId;
+
+        const user = await client.users.fetch(inviterId).catch(() => null);
+        if (!user) continue;
+
+        const msg =
+          `💰 **Affiliate Summary — ${monthKey}**\n\n` +
+          `You earned **€${eur}** from **${q} qualified referrals**.\n\n` +
+          `Thanks for helping grow Kickz Caviar 🤝`;
+
+        const sentOk = await user.send(msg).then(() => true).catch((e) => {
+          console.error("LB: DM failed (DMs closed?)", inviterId, e?.message || e);
+          return false;
+        });
+
+        // Only mark as sent if DM actually went through
+        if (sentOk) {
+          await membersTable.update(memberRec.id, {
+            "Last Earnings DM Month": monthKey,
+          }).catch((e) => console.error("LB: failed to mark Last Earnings DM Month", e));
+
+          console.log("LB: DM sent", username, "€", eur, "month", monthKey);
+        }
+      }
+    }
 
     // sort helpers
     const topInvites = [...inviteCounts.entries()]
@@ -252,7 +331,8 @@ export function registerLeaderboards(ctx) {
         const prev = prevMonthKey(nowMonth);
         const prevData = await buildLeaderboardsForMonth(prev);
         const finalEmbed = await renderFinalMonthEmbed(prev, prevData.inviteLines, prevData.earnLines);
-        await postWinnersIfNotPosted(winnersChannel, prev, finalEmbed);
+        await postWinnersIfNotPosted(winnersChannel, prev, finalEmbed); 
+        await sendMonthlyEarningsDMs(prev);
       }
 
       currentMonth = nowMonth;
