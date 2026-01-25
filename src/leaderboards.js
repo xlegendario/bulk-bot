@@ -92,6 +92,24 @@ export function registerLeaderboards(ctx) {
     return rows || [];
   }
 
+  async function findOrCreatePinnedLeaderboardMessage(channel) {
+    const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+    const existing = recent?.find(
+      (m) =>
+        m.author?.id === channel.client.user.id &&
+        m.embeds?.[0]?.title?.startsWith("🏆 LEADERBOARD —")
+    );
+
+    if (existing) {
+      if (!existing.pinned) await existing.pin().catch(() => {});
+      return existing;
+    }
+
+    const msg = await channel.send({ content: "🏆 Leaderboard is initializing..." });
+    await msg.pin().catch(() => {});
+    return msg;
+  }
+
   async function buildLeaderboardsForMonth(monthKey) {
     const rows = await fetchInviteRowsForMonth(monthKey);
 
@@ -111,6 +129,8 @@ export function registerLeaderboards(ctx) {
         qualifiedCounts.set(inviterId, (qualifiedCounts.get(inviterId) || 0) + 1);
       }
     }
+
+    
 
     // sort helpers
     const topInvites = [...inviteCounts.entries()]
@@ -184,22 +204,22 @@ export function registerLeaderboards(ctx) {
 
     return new EmbedBuilder()
       .setTitle(`🏆 LEADERBOARD — ${monthKey}`)
-      .setDescription(`Last updated: **${lastUpdated}** (Amsterdam)`)
+      .setDescription(`Last updated: **${lastUpdated}**`)
       .addFields(
         { name: "\u200B", value: "\u200B" }, // space after timestamp
 
-        { name: "🔥 Top Inviters (This Month)", value: inviteLines.join("\n") },
+        { name: "🔥 Top Inviters", value: inviteLines.join("\n") },
 
         { name: "\u200B", value: "\u200B" }, // space between leaderboards
 
-        { name: `💰 Top Earners (€${FEE} per Qualified)`, value: earnLines.join("\n") }
+        { name: `💰 Top Affiliates`, value: earnLines.join("\n") }
       );
   }
 
   async function renderFinalMonthEmbed(monthKey, inviteLines, earnLines) {
     return new EmbedBuilder()
       .setTitle(`🏁 FINAL RESULTS — ${monthKey}`)
-      .setDescription("Locked standings (final).")
+      .setDescription("Locked statistics.")
       .addFields(
         { name: "\u200B", value: "\u200B" },
 
@@ -207,7 +227,7 @@ export function registerLeaderboards(ctx) {
 
         { name: "\u200B", value: "\u200B" },
 
-        { name: `💰 Top Earners (€${FEE} per Qualified)`, value: earnLines.join("\n") }
+        { name: `💰 Top Affiliates`, value: earnLines.join("\n") }
       );
   }
 
@@ -220,7 +240,7 @@ export function registerLeaderboards(ctx) {
         const g = client.guilds.cache.get(String(AFFILIATE_GUILD_ID));
         if (!g) return;
       }
-
+      
       const lbChannel = await client.channels.fetch(String(LEADERBOARD_CHANNEL_ID)).catch(() => null);
       const winnersChannel = await client.channels.fetch(String(WINNERS_CHANNEL_ID)).catch(() => null);
       if (!lbChannel?.isTextBased() || !winnersChannel?.isTextBased()) return;
