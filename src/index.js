@@ -3433,7 +3433,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         cid.startsWith(`${BUYER_ONB.BTN_START}:`) ||
         cid.startsWith(`${BUYER_ONB.COUNTRY_SELECT}:`) || // (select menus aren’t buttons, but fine)
         cid.startsWith(`${BUYER_ONB.MODAL_CONTACT}:`) ||
-        cid.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`)
+        cid.startsWith(`${BUYER_ONB.CONTINUE_ADDR}:`) ||
+
+        // Admin initiate quote (same idea: handler does its own defer/showModal)
+        cid === INITQADM.BTN_BASIC ||
+        cid === INITQADM.BTN_SPECIFIC ||
+        cid.startsWith(`${INITQADM.BRAND}:`)
       );
 
     if (!skipAutoDefer) {
