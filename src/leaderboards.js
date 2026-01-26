@@ -1,4 +1,10 @@
-import { EmbedBuilder, Events } from "discord.js";
+import {
+  EmbedBuilder,
+  Events,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} from "discord.js";
 
 export function registerLeaderboards(ctx) {
   const { client, base, env } = ctx;
@@ -14,6 +20,7 @@ export function registerLeaderboards(ctx) {
     LEADERBOARD_TOP_N = "10",
     REFERRAL_QUALIFIED_FIELD = "Referral Qualified",
     REFERRAL_FEE_EUR = "5",
+    DISCORD_TOKEN, // needed for slash command registration
   } = env;
 
   if (!LEADERBOARD_CHANNEL_ID || !WINNERS_CHANNEL_ID) {
@@ -66,6 +73,26 @@ export function registerLeaderboards(ctx) {
     return name;
   }
 
+  // ---- table formatting (columns) ----
+  function clampName(name, max = 18) {
+    const s = String(name || "");
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  }
+
+  function formatTable(headers, rows, col1Width = 18) {
+    const h1 = String(headers[0]).padEnd(col1Width);
+    const h2 = String(headers[1]);
+
+    const sep = "─".repeat(col1Width + h2.length);
+
+    const body = rows.map(([a, b]) => {
+      const c1 = clampName(a, col1Width).padEnd(col1Width);
+      return c1 + String(b);
+    });
+
+    return "```" + [h1 + h2, sep, ...body].join("\n") + "```";
+  }
+
   async function fetchInviteRowsForMonth(monthKey) {
     return (
       (await invitesLogTable
@@ -81,9 +108,7 @@ export function registerLeaderboards(ctx) {
   async function findOrCreatePinnedLeaderboardMessage(channel) {
     const recent = await channel.messages.fetch({ limit: 50 }).catch(() => null);
     const existing = recent?.find(
-      (m) =>
-        m.author?.id === client.user.id &&
-        m.embeds?.[0]?.title?.startsWith("🏆 LEADERBOARD —")
+      (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title?.startsWith("🏆 LEADERBOARD —")
     );
 
     if (existing) {
@@ -121,23 +146,27 @@ export function registerLeaderboards(ctx) {
       .sort((a, b) => b[1] - a[1])
       .slice(0, TOP_N);
 
-    const inviteLines = [];
-    for (let i = 0; i < topInvites.length; i++) {
-      const [id, c] = topInvites[i];
-      inviteLines.push(`${i + 1}. **${await getDiscordUsername(id)}** — ${c}`);
+    // Rows for column tables
+    const inviteRows = [];
+    for (const [id, c] of topInvites) {
+      inviteRows.push([await getDiscordUsername(id), String(c)]);
     }
-    if (!inviteLines.length) inviteLines.push("No invites yet this month.");
-
-    const affiliateLines = [];
-    for (let i = 0; i < topAffiliates.length; i++) {
-      const [id, q] = topAffiliates[i];
-      affiliateLines.push(
-        `${i + 1}. **${await getDiscordUsername(id)}** — €${q * FEE} (${q})`
-      );
+    const affiliateRows = [];
+    for (const [id, q] of topAffiliates) {
+      affiliateRows.push([await getDiscordUsername(id), `€${q * FEE}`]);
     }
-    if (!affiliateLines.length) affiliateLines.push("No qualified referrals yet.");
 
-    return { inviteLines, affiliateLines };
+    const inviteTable =
+      inviteRows.length > 0
+        ? formatTable(["User", "Invites"], inviteRows)
+        : "No invites yet this month.";
+
+    const affiliateTable =
+      affiliateRows.length > 0
+        ? formatTable(["User", "Total Earnings"], affiliateRows)
+        : "No qualified referrals yet.";
+
+    return { inviteTable, affiliateTable };
   }
 
   async function sendMonthlyEarningsDMs(monthKey) {
@@ -186,11 +215,115 @@ export function registerLeaderboards(ctx) {
       const sent = await user.send({ embeds: [embed] }).then(() => true).catch(() => false);
       if (!sent) continue;
 
-      await membersTable.update(rec.id, {
-        "Last Earnings DM Month": monthKey,
-      });
+      await membersTable.update(rec.id, { "Last Earnings DM Month": monthKey });
     }
   }
+
+  // ---- /mystats ----
+  async function computeUserStats(userId, monthKey) {
+    const id = norm(userId);
+
+    const rows = await invitesLogTable
+      .select({
+        filterByFormula: `{Month Key}='${escape(monthKey)}'`,
+        fields: ["Inviter Discord User ID", REFERRAL_QUALIFIED_FIELD],
+      })
+      .all()
+      .catch(() => []);
+
+    let invites = 0;
+    let qualified = 0;
+
+    for (const r of rows) {
+      const inviterId = norm(r.fields?.["Inviter Discord User ID"]);
+      if (inviterId !== id) continue;
+      invites++;
+      if (r.fields?.[REFERRAL_QUALIFIED_FIELD]) qualified++;
+    }
+
+    return { invites, qualified, earned: qualified * FEE };
+  }
+
+  async function computeUserAllTime(userId) {
+    const id = norm(userId);
+
+    const rows = await invitesLogTable
+      .select({
+        filterByFormula: `{Inviter Discord User ID}='${escape(id)}'`,
+        fields: [REFERRAL_QUALIFIED_FIELD],
+      })
+      .all()
+      .catch(() => []);
+
+    let invites = rows.length;
+    let qualified = 0;
+    for (const r of rows) {
+      if (r.fields?.[REFERRAL_QUALIFIED_FIELD]) qualified++;
+    }
+
+    return { invites, qualified, earned: qualified * FEE };
+  }
+
+  async function registerMyStatsCommand() {
+    if (!DISCORD_TOKEN) {
+      console.warn("⚠️ /mystats not registered: DISCORD_TOKEN missing in env.");
+      return;
+    }
+    if (!AFFILIATE_GUILD_ID) {
+      console.warn("⚠️ /mystats not registered: AFFILIATE_GUILD_ID missing in env.");
+      return;
+    }
+
+    const cmd = new SlashCommandBuilder()
+      .setName("mystats")
+      .setDescription("View your affiliate stats (this month / last month / all-time).");
+
+    const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
+
+    await rest.put(
+      Routes.applicationGuildCommands(client.user.id, String(AFFILIATE_GUILD_ID)),
+      { body: [cmd.toJSON()] }
+    );
+
+    console.log("✅ /mystats command registered");
+  }
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+    if (interaction.commandName !== "mystats") return;
+
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
+    const nowMonth = monthKeyAmsterdam();
+    const lastMonth = prevMonthKey(nowMonth);
+
+    const thisM = await computeUserStats(interaction.user.id, nowMonth);
+    const lastM = await computeUserStats(interaction.user.id, lastMonth);
+    const allT = await computeUserAllTime(interaction.user.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle("📈 Your Affiliate Stats")
+      .setColor(0xffd300)
+      .addFields(
+        {
+          name: `This Month — ${nowMonth}`,
+          value: `Invites: **${thisM.invites}**\nQualified: **${thisM.qualified}**\nEarned: **€${thisM.earned}**`,
+          inline: true,
+        },
+        {
+          name: `Last Month — ${lastMonth}`,
+          value: `Invites: **${lastM.invites}**\nQualified: **${lastM.qualified}**\nEarned: **€${lastM.earned}**`,
+          inline: true,
+        },
+        {
+          name: "All-time",
+          value: `Invites: **${allT.invites}**\nQualified: **${allT.qualified}**\nEarned: **€${allT.earned}**`,
+          inline: false,
+        }
+      );
+
+    await interaction.editReply({ embeds: [embed] }).catch(() => {});
+  });
 
   let currentMonth = null;
 
@@ -211,8 +344,8 @@ export function registerLeaderboards(ctx) {
         const finalEmbed = new EmbedBuilder()
           .setTitle(`🏁 FINAL RESULTS — ${prev}`)
           .addFields(
-            { name: "🔥 Top Inviters", value: data.inviteLines.join("\n") },
-            { name: "💰 Top Affiliates", value: data.affiliateLines.join("\n") }
+            { name: "🔥 Top Inviters", value: data.inviteTable },
+            { name: "💰 Top Affiliates", value: data.affiliateTable }
           );
 
         await winnersChannel.send({ embeds: [finalEmbed] }).catch(() => {});
@@ -222,11 +355,12 @@ export function registerLeaderboards(ctx) {
       currentMonth = nowMonth;
 
       const data = await buildLeaderboardsForMonth(nowMonth);
+
       const embed = new EmbedBuilder()
         .setTitle(`🏆 LEADERBOARD — ${nowMonth}`)
         .addFields(
-          { name: "🔥 Top Inviters", value: data.inviteLines.join("\n") },
-          { name: "💰 Top Affiliates", value: data.affiliateLines.join("\n") }
+          { name: "🔥 Top Inviters", value: data.inviteTable },
+          { name: "💰 Top Affiliates", value: data.affiliateTable }
         );
 
       const msg = await findOrCreatePinnedLeaderboardMessage(lbChannel);
@@ -238,6 +372,7 @@ export function registerLeaderboards(ctx) {
 
   client.once(Events.ClientReady, async () => {
     console.log("✅ Leaderboards module ready.");
+    await registerMyStatsCommand().catch((e) => console.error("LB: command reg failed", e));
     await tick();
     setInterval(tick, 10 * 60 * 1000);
   });
