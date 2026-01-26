@@ -5,6 +5,8 @@ import { registerGatekeeping } from "./gatekeeping.js";
 import { registerWelcome } from "./welcome.js";
 import { registerAffiliateInvites } from "./affiliateInvites.js";
 import { registerLeaderboards } from "./leaderboards.js";
+import { registerGuideMessage } from "./guideMessage.js";
+import { registerTermsMessage } from "./termsMessage.js";
 import "dotenv/config";
 import express from "express";
 import morgan from "morgan";
@@ -1477,6 +1479,17 @@ registerLeaderboards({
   env: process.env
 });
 
+registerGuideMessage({
+  client,
+  base,
+  env: process.env
+});
+
+registerTermsMessage({
+  client,
+  base,
+  env: process.env
+});
 
 client.on("error", (err) => {
   console.error("Discord client error:", err);
