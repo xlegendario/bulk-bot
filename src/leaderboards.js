@@ -308,12 +308,12 @@ export function registerLeaderboards(ctx) {
         {
           name: `This Month — ${nowMonth}`,
           value: `Invites: **${thisM.invites}**\nQualified: **${thisM.qualified}**\nEarned: **€${thisM.earned}**`,
-          inline: true,
+          inline: false,
         },
         {
           name: `Last Month — ${lastMonth}`,
           value: `Invites: **${lastM.invites}**\nQualified: **${lastM.qualified}**\nEarned: **€${lastM.earned}**`,
-          inline: true,
+          inline: false,
         },
         {
           name: "All-time",
