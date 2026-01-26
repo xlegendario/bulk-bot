@@ -53,7 +53,7 @@ export function registerTermsMessage(ctx) {
           "• Staff decisions are final",
           "\u200B",
           "**6️⃣ Affiliate & Rewards**",
-          "• Rewards are paid only for **qualified referrals**",
+          "• Earnings are paid per month & only for **qualified referrals**",
           "• Abuse of the system results in removal from the program",
           "\u200B",
           "**📌 Final Note**",
