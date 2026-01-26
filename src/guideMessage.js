@@ -33,7 +33,7 @@ export function registerGuideMessage(ctx) {
           "\u200B",
           "**🧭 STEP 1 — GET ACCESS**",
           "",
-          "• Request access via <#1463963353188798485>,
+          "• Request access via <#1463963353188798485>",
           "• All applicants are placed on a waitlist",
           "• Access is granted manually by admins",
           "• We prioritize serious, active buyers",
