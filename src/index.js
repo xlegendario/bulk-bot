@@ -3843,8 +3843,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setPlaceholder("e.g. 00683");
   
       const sku = new TextInputBuilder().setCustomId(INITQADM.SKU).setLabel("SKU").setStyle(TextInputStyle.Short).setRequired(true);
-      const min = new TextInputBuilder().setCustomId(INITQADM.MIN).setLabel("Min Size").setStyle(TextInputStyle.Short).setRequired(true);
-      const max = new TextInputBuilder().setCustomId(INITQADM.MAX).setLabel("Max Size").setStyle(TextInputStyle.Short).setRequired(true);
+      const sizeRange = new TextInputBuilder()
+        .setCustomId("initqadm_size_range")
+        .setLabel("Size range (min-max)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('e.g. "38-46" or "38.5 - 45"');
       const price = new TextInputBuilder().setCustomId(INITQADM.PRICE).setLabel("Supplier Price").setStyle(TextInputStyle.Short).setRequired(true);
       const eta = new TextInputBuilder().setCustomId(INITQADM.ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true);
   
@@ -3940,8 +3944,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   
     const sku = interaction.fields.getTextInputValue(INITQADM.SKU)?.trim();
-    const min = interaction.fields.getTextInputValue(INITQADM.MIN)?.trim();
-    const max = interaction.fields.getTextInputValue(INITQADM.MAX)?.trim();
+    const rangeRaw = interaction.fields.getTextInputValue("initqadm_size_range")?.trim() || "";
+    const parts = rangeRaw.split(/-|–|—|to/i).map(s => s.trim()).filter(Boolean);
+    
+    if (parts.length < 2) {
+      await interaction.editReply('❌ Please enter the size range like "38-46".');
+      return;
+    }
+    
+    const min = parts[0];
+    const max = parts[1];
+
     const priceNum = parseMoneyNumber(interaction.fields.getTextInputValue(INITQADM.PRICE));
     const etaNum = Number.parseInt(interaction.fields.getTextInputValue(INITQADM.ETA), 10);
   
