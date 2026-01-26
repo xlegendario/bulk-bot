@@ -3855,8 +3855,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       modal.addComponents(
         new ActionRowBuilder().addComponents(supplier),
         new ActionRowBuilder().addComponents(sku),
-        new ActionRowBuilder().addComponents(min),
-        new ActionRowBuilder().addComponents(max),
+        new ActionRowBuilder().addComponents(sizeRange),
         new ActionRowBuilder().addComponents(price),
         new ActionRowBuilder().addComponents(eta)
       );
