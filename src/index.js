@@ -74,6 +74,7 @@ const {
   ADMIN_DRAFT_QUOTES_CHANNEL_ID,
   SUPPLIER_GUILD_ID,
   CLOSED_BULKS_CHANNEL_ID,
+  ADMIN_INITIATE_QUOTES_CHANNEL_ID,
   
 } = process.env;
 
@@ -221,6 +222,7 @@ const F = {
   SUP_SKU_REQUESTS_CH_ID: "SKU Requests Channel ID",
   SUP_DISCORD_USER_ID: "Discord User ID", // if your Suppliers table uses a different name, change only this line,
   SUP_OPPORTUNITIES_CH_ID: "Opportunities Channel ID",
+  SUP_SELLER_ID: "Seller ID",
 
   // Bulk Requests
   BR_SKU: "SKU",
@@ -844,6 +846,28 @@ const INITQ = {
   FINAL_ETA: "initq_final_eta",
 };
 
+const INITQADM = {
+  BTN_BASIC: "initqadm_basic",
+  BTN_SPECIFIC: "initqadm_specific",
+
+  BRAND: "initqadm_brand", // initqadm_brand:<mode>:<presetId>
+
+  BASIC_MODAL: "initqadm_basic_modal", // initqadm_basic_modal:<presetId>
+  SUPPLIER_DIGITS: "initqadm_supplier_digits",
+  SKU: "initqadm_sku",
+  MIN: "initqadm_min",
+  MAX: "initqadm_max",
+  PRICE: "initqadm_price",
+  ETA: "initqadm_eta",
+
+  FINAL_MODAL: "initqadm_final_modal", // initqadm_final_modal:<msgId>
+  FINAL_SUPPLIER_DIGITS: "initqadm_final_supplier_digits",
+  FINAL_SKU: "initqadm_final_sku",
+  FINAL_PRICE: "initqadm_final_price",
+  FINAL_ETA: "initqadm_final_eta",
+};
+
+
 const BUYER_ONB = {
   BTN_START: "buyer_onb_start",            // buyer_onb_start:<oppId>
   COUNTRY_SELECT: "buyer_onb_country",     // buyer_onb_country:<oppId>
@@ -1276,6 +1300,24 @@ function buildOrFormula(fieldName, values) {
   return `OR(${parts.join(",")})`;
 }
 
+async function findSupplierBySellerIdDigits(digitsRaw) {
+  const digits = String(digitsRaw || "").replace(/\D/g, "");
+  if (!digits) return null;
+
+  const sellerId = `SE-${digits.padStart(5, "0")}`;
+
+  const rows = await suppliersTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `{${F.SUP_SELLER_ID}}='${escapeForFormula(sellerId)}'`,
+    })
+    .firstPage();
+
+  if (!rows.length) return null;
+  return { supplierRecordId: rows[0].id, sellerId };
+}
+
+
 function safeChannelName(usernameOrTag) {
   const raw = String(usernameOrTag || "buyer").toLowerCase();
   const base = raw
@@ -1539,6 +1581,7 @@ client.once(Events.ClientReady, async (c) => {
 
   await ensureRequestBulksMessage();
   await ensureInitiateQuoteMessagesForSuppliers();
+  await ensureInitiateQuoteMessageForAdmins();
 
   // Start reminders
   setInterval(() => runReminderTick(), REMINDER_TICK_MS);
@@ -2554,6 +2597,32 @@ function buildInitiateQuoteEmbed() {
     )
     .setColor(0xffd300);
 }
+
+function buildInitiateQuoteRowForAdmins() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(INITQADM.BTN_BASIC).setLabel("Initiate Quote").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(INITQADM.BTN_SPECIFIC).setLabel("Initiate Quote (Specific)").setStyle(ButtonStyle.Secondary)
+  );
+}
+
+async function ensureInitiateQuoteMessageForAdmins() {
+  if (!ADMIN_INITIATE_QUOTES_CHANNEL_ID) return;
+
+  const ch = await client.channels.fetch(String(ADMIN_INITIATE_QUOTES_CHANNEL_ID)).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
+
+  const embed = buildInitiateQuoteEmbed();
+  const row = buildInitiateQuoteRowForAdmins();
+
+  const recent = await ch.messages.fetch({ limit: 25 }).catch(() => null);
+  const existing = recent?.find(
+    (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === "📦 Initiate Quotes"
+  );
+
+  if (existing) await existing.edit({ embeds: [embed], components: [row] }).catch(() => {});
+  else await ch.send({ embeds: [embed], components: [row] }).catch(() => {});
+}
+
 
 function buildInitiateQuoteRow() {
   return new ActionRowBuilder().addComponents(
@@ -3690,6 +3759,228 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   // =========================
+  // INITIATE QUOTE (Admin): on behalf of the supplier
+  // =========================
+
+  if (interaction.isButton() && (interaction.customId === INITQADM.BTN_BASIC || interaction.customId === INITQADM.BTN_SPECIFIC)) {
+    // Staff only
+    const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!member || !isStaffMember(member)) {
+      await interaction.reply({ content: "⛔ Staff only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+  
+    // Optional: force only in admin channel
+    if (ADMIN_INITIATE_QUOTES_CHANNEL_ID && interaction.channelId !== String(ADMIN_INITIATE_QUOTES_CHANNEL_ID)) {
+      await interaction.reply({ content: "⚠️ Use this in the Admin Initiate Quotes channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+  
+    const mode = interaction.customId === INITQADM.BTN_SPECIFIC ? "specific" : "basic";
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  
+    const presets = await fetchAllBrandPresets();
+    if (!presets.length) {
+      await interaction.editReply("❌ No brand presets found in Airtable (Size Presets table).");
+      return;
+    }
+  
+    const embed = buildSelectBrandEmbed(mode);
+  
+    // Build rows with admin brand prefix
+    const rows = [];
+    for (let i = 0; i < presets.length; i += 5) {
+      const chunk = presets.slice(i, i + 5);
+      rows.push(
+        new ActionRowBuilder().addComponents(
+          ...chunk.map((p) =>
+            new ButtonBuilder()
+              .setCustomId(`${INITQADM.BRAND}:${mode}:${p.id}`)
+              .setLabel(String(p.label).slice(0, 80))
+              .setStyle(ButtonStyle.Primary)
+          )
+        )
+      );
+      if (rows.length >= 5) break;
+    }
+  
+    await interaction.editReply({ embeds: [embed], components: rows });
+    scheduleDeleteInteractionReply(interaction, 15000);
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith(`${INITQADM.BRAND}:`)) {
+    const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!member || !isStaffMember(member)) {
+      await interaction.reply({ content: "⛔ Staff only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+  
+    const [, mode, presetId] = interaction.customId.split(":");
+  
+    // BASIC -> modal
+    if (mode === "basic") {
+      const preset = await getPresetById(presetId).catch(() => null);
+      if (!preset || !preset.ladder?.length) {
+        await interaction.reply({ content: "❌ Could not load that brand ladder.", flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+  
+      const modal = new ModalBuilder()
+        .setCustomId(`${INITQADM.BASIC_MODAL}:${presetId}`)
+        .setTitle("Initiate Quote (Admin)");
+  
+      const supplier = new TextInputBuilder()
+        .setCustomId(INITQADM.SUPPLIER_DIGITS)
+        .setLabel("Supplier Seller ID (digits only)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 00683");
+  
+      const sku = new TextInputBuilder().setCustomId(INITQADM.SKU).setLabel("SKU").setStyle(TextInputStyle.Short).setRequired(true);
+      const min = new TextInputBuilder().setCustomId(INITQADM.MIN).setLabel("Min Size").setStyle(TextInputStyle.Short).setRequired(true);
+      const max = new TextInputBuilder().setCustomId(INITQADM.MAX).setLabel("Max Size").setStyle(TextInputStyle.Short).setRequired(true);
+      const price = new TextInputBuilder().setCustomId(INITQADM.PRICE).setLabel("Supplier Price").setStyle(TextInputStyle.Short).setRequired(true);
+      const eta = new TextInputBuilder().setCustomId(INITQADM.ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true);
+  
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(supplier),
+        new ActionRowBuilder().addComponents(sku),
+        new ActionRowBuilder().addComponents(min),
+        new ActionRowBuilder().addComponents(max),
+        new ActionRowBuilder().addComponents(price),
+        new ActionRowBuilder().addComponents(eta)
+      );
+  
+      await interaction.showModal(modal);
+      return;
+    }
+  
+    // SPECIFIC -> start stock setup message, like supplier flow
+    // acknowledge brand click quickly
+    try {
+      const disabled = interaction.message.components.map((row) => {
+        const r = ActionRowBuilder.from(row);
+        r.components = row.components.map((c) => ButtonBuilder.from(c).setDisabled(true));
+        return r;
+      });
+      await interaction.update({ components: disabled });
+    } catch {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+  
+    const preset = await getPresetById(presetId).catch(() => null);
+    if (!preset || !preset.ladder?.length) {
+      await interaction.followUp({ content: "❌ Could not load that brand ladder.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+  
+    if (!interaction.channel || !interaction.channel.isTextBased()) {
+      await interaction.followUp({ content: "❌ This must be used inside a text channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      return;
+    }
+  
+    const qtyMap = new Map();
+    for (const s of preset.ladder) qtyMap.set(s, 0);
+  
+    const embed = buildStockSetupEmbed({
+      brandLabel: preset.label,
+      skuPreview: "",
+      qtyMap,
+      ladder: preset.ladder,
+    });
+  
+    const stockMsg = await interaction.channel.send({
+      embeds: [embed],
+      components: buildStockSizeRows("PENDING", preset.ladder),
+    });
+  
+    await stockMsg.edit({
+      components: buildStockSizeRows(stockMsg.id, preset.ladder),
+    });
+  
+    initiateQuoteSessions.set(stockMsg.id, {
+      presetId,
+      brandLabel: preset.label,
+      ladder: preset.ladder,
+      qtyMap,
+      createdBy: interaction.user.id,
+      isAdminFlow: true, // ✅ key flag
+    });
+  
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${INITQADM.BASIC_MODAL}:`)) {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  
+    const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!member || !isStaffMember(member)) {
+      await interaction.editReply("⛔ Staff only.");
+      return;
+    }
+  
+    const presetId = interaction.customId.split(":")[1];
+    const preset = await getPresetById(presetId).catch(() => null);
+    if (!preset || !preset.ladder?.length) {
+      await interaction.editReply("❌ Could not load brand ladder.");
+      return;
+    }
+  
+    const supplierDigits = interaction.fields.getTextInputValue(INITQADM.SUPPLIER_DIGITS);
+    const supplierHit = await findSupplierBySellerIdDigits(supplierDigits);
+    if (!supplierHit) {
+      await interaction.editReply("❌ Supplier not found in Airtable (Suppliers table) by Seller ID.");
+      return;
+    }
+  
+    const sku = interaction.fields.getTextInputValue(INITQADM.SKU)?.trim();
+    const min = interaction.fields.getTextInputValue(INITQADM.MIN)?.trim();
+    const max = interaction.fields.getTextInputValue(INITQADM.MAX)?.trim();
+    const priceNum = parseMoneyNumber(interaction.fields.getTextInputValue(INITQADM.PRICE));
+    const etaNum = Number.parseInt(interaction.fields.getTextInputValue(INITQADM.ETA), 10);
+  
+    if (!sku) return void (await interaction.editReply("❌ SKU required."));
+    if (!min || !max) return void (await interaction.editReply("❌ Min and Max size required."));
+  
+    const minNorm = normalizeSizeToLadder(preset.ladder, min, { prefer: "down", maxDist: 0.51 });
+    const maxNorm = normalizeSizeToLadder(preset.ladder, max, { prefer: "up", maxDist: 0.51 });
+  
+    if (!minNorm.ok || !maxNorm.ok) {
+      const examples = preset.ladder.slice(0, 10).join(", ");
+      await interaction.editReply(
+        `❌ Size not valid for **${preset.label}**.\nUse exact ladder sizes.\n\nExamples: ${examples}`
+      );
+      return;
+    }
+  
+    const minFixed = minNorm.value;
+    const maxFixed = maxNorm.value;
+  
+    const allowedSizes = sliceLadderByMinMax(preset.ladder, minFixed, maxFixed);
+    if (!allowedSizes.length) {
+      await interaction.editReply("❌ Could not derive allowed sizes from Min/Max.");
+      return;
+    }
+  
+    const created = await oppsTable.create({
+      [F.OPP_STATUS]: "Draft",
+      [F.OPP_SKU_SOFT]: sku,
+      [F.OPP_MIN_SIZE]: minFixed,
+      [F.OPP_MAX_SIZE]: maxFixed,
+      [F.OPP_SUPPLIER_UNIT_PRICE]: priceNum,
+      [F.OPP_ETA_BUSINESS_DAYS]: etaNum,
+      [F.OPP_SUPPLIER_LINK]: [supplierHit.supplierRecordId],
+      [F.OPP_ALLOWED_SIZES]: allowedSizes.join(", "),
+    });
+  
+    await interaction.editReply(`✅ Draft Opportunity created: **${created.id}** (Supplier: **${supplierHit.sellerId}**)`);
+    scheduleDeleteInteractionReply(interaction, 5000);
+    return;
+  }
+
+  
+  // =========================
   // INITIATE QUOTE (Supplier): open Select Brand
   // =========================
   if (interaction.isButton() && (interaction.customId === INITQ.BTN_BASIC || interaction.customId === INITQ.BTN_SPECIFIC)) {
@@ -3933,7 +4224,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQ.STOCK_CONFIRM}:`)) {
     const stockMsgId = interaction.customId.split(":")[1];
-
+  
     const sess = initiateQuoteSessions.get(stockMsgId);
     if (!sess) {
       await interaction.reply({ content: "❌ Stock session expired. Start again.", flags: MessageFlags.Ephemeral });
@@ -3943,27 +4234,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.reply({ content: "⛔ Only the supplier who started this can confirm it.", flags: MessageFlags.Ephemeral });
       return;
     }
-
+  
     const anyQty = Array.from(sess.qtyMap.values()).some((q) => Number(q) > 0);
     if (!anyQty) {
       await interaction.reply({ content: "⚠️ Set at least one size quantity > 0 before confirming.", flags: MessageFlags.Ephemeral });
       return;
     }
-
+  
+    // ✅ Admin session -> open admin final modal (asks supplier Seller ID digits)
+    if (sess?.isAdminFlow) {
+      const modal = new ModalBuilder()
+        .setCustomId(`${INITQADM.FINAL_MODAL}:${stockMsgId}`)
+        .setTitle("Finalize Specific Quote (Admin)");
+  
+      const supplier = new TextInputBuilder()
+        .setCustomId(INITQADM.FINAL_SUPPLIER_DIGITS)
+        .setLabel("Supplier Seller ID (digits only)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder("e.g. 00683");
+  
+      const sku = new TextInputBuilder()
+        .setCustomId(INITQADM.FINAL_SKU)
+        .setLabel("SKU")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+  
+      const price = new TextInputBuilder()
+        .setCustomId(INITQADM.FINAL_PRICE)
+        .setLabel("Supplier Price")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+  
+      const eta = new TextInputBuilder()
+        .setCustomId(INITQADM.FINAL_ETA)
+        .setLabel("ETA (Business Days)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+  
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(supplier),
+        new ActionRowBuilder().addComponents(sku),
+        new ActionRowBuilder().addComponents(price),
+        new ActionRowBuilder().addComponents(eta)
+      );
+  
+      await interaction.showModal(modal);
+      return; // ⬅️ IMPORTANT: stops here
+    }
+  
+    // ✅ Normal supplier session -> open existing supplier final modal
     const modal = new ModalBuilder()
       .setCustomId(`${INITQ.FINAL_MODAL}:${stockMsgId}`)
       .setTitle("Finalize Specific Quote");
-
-    const sku = new TextInputBuilder().setCustomId(INITQ.FINAL_SKU).setLabel("SKU").setStyle(TextInputStyle.Short).setRequired(true);
-    const price = new TextInputBuilder().setCustomId(INITQ.FINAL_PRICE).setLabel("Supplier Price").setStyle(TextInputStyle.Short).setRequired(true);
-    const eta = new TextInputBuilder().setCustomId(INITQ.FINAL_ETA).setLabel("ETA (Business Days)").setStyle(TextInputStyle.Short).setRequired(true);
-
+  
+    const sku = new TextInputBuilder()
+      .setCustomId(INITQ.FINAL_SKU)
+      .setLabel("SKU")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+  
+    const price = new TextInputBuilder()
+      .setCustomId(INITQ.FINAL_PRICE)
+      .setLabel("Supplier Price")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+  
+    const eta = new TextInputBuilder()
+      .setCustomId(INITQ.FINAL_ETA)
+      .setLabel("ETA (Business Days)")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+  
     modal.addComponents(
       new ActionRowBuilder().addComponents(sku),
       new ActionRowBuilder().addComponents(price),
       new ActionRowBuilder().addComponents(eta)
     );
-
+  
     await interaction.showModal(modal);
     return;
   }
@@ -4082,6 +4430,104 @@ client.on(Events.InteractionCreate, async (interaction) => {
     scheduleDeleteInteractionReply(interaction, 5000);
     return;
   }
+
+    
+  // // // // // // // //
+  // Admini Supplier INITITAE QUOTE
+  // // // // // // //
+  if (interaction.isModalSubmit() && interaction.customId.startsWith(`${INITQADM.FINAL_MODAL}:`)) {
+    const stockMsgId = interaction.customId.split(":")[1];
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  
+    const sess = initiateQuoteSessions.get(stockMsgId);
+    if (!sess || !sess.isAdminFlow) {
+      await interaction.editReply("❌ Stock session expired or not an admin session.");
+      return;
+    }
+  
+    // Only the admin who started this stock setup can finalize it
+    if (sess.createdBy && sess.createdBy !== interaction.user.id) {
+      await interaction.editReply("❌ Only the admin who started this stock setup can finalize it.");
+      return;
+    }
+  
+    // Supplier lookup by Seller ID digits (00683 -> SE-00683)
+    const supplierDigits = interaction.fields.getTextInputValue(INITQADM.FINAL_SUPPLIER_DIGITS);
+    const supplierHit = await findSupplierBySellerIdDigits(supplierDigits);
+    if (!supplierHit) {
+      await interaction.editReply("❌ Supplier not found in Airtable by Seller ID.");
+      return;
+    }
+  
+    const sku = interaction.fields.getTextInputValue(INITQADM.FINAL_SKU)?.trim();
+    const supplierPrice = parseMoneyNumber(interaction.fields.getTextInputValue(INITQADM.FINAL_PRICE));
+    const etaDays = Number.parseInt(interaction.fields.getTextInputValue(INITQADM.FINAL_ETA), 10);
+  
+    if (!sku) return void (await interaction.editReply("❌ SKU required."));
+    if (supplierPrice == null || !Number.isFinite(supplierPrice) || supplierPrice <= 0) {
+      await interaction.editReply("❌ Supplier Price must be a valid positive number.");
+      return;
+    }
+    if (!Number.isFinite(etaDays) || etaDays <= 0) {
+      await interaction.editReply("❌ ETA must be a positive number.");
+      return;
+    }
+  
+    // Build allowed qty json from session qtyMap
+    const allowedQty = {};
+    let totalPairs = 0;
+  
+    for (const [size, qty] of sess.qtyMap.entries()) {
+      const n = Number(qty) || 0;
+      if (n > 0) {
+        allowedQty[size] = n;
+        totalPairs += n;
+      }
+    }
+  
+    if (!totalPairs) {
+      await interaction.editReply("❌ You must enter at least one pair.");
+      return;
+    }
+  
+    const allowedSizesArr = Object.keys(allowedQty).sort((a, b) =>
+      String(a).localeCompare(String(b), undefined, { numeric: true })
+    );
+    const minSize = allowedSizesArr[0];
+    const maxSize = allowedSizesArr[allowedSizesArr.length - 1];
+  
+    // Create Draft Opportunity (same as supplier flow, only supplier link differs)
+    const created = await oppsTable.create({
+      [F.OPP_STATUS]: "Draft",
+      [F.OPP_SKU_SOFT]: sku,
+      [F.OPP_MIN_SIZE]: minSize,
+      [F.OPP_MAX_SIZE]: maxSize,
+      [F.OPP_SUPPLIER_UNIT_PRICE]: supplierPrice,
+      [F.OPP_ETA_BUSINESS_DAYS]: etaDays,
+      [F.OPP_SUPPLIER_LINK]: [supplierHit.supplierRecordId],
+      [F.OPP_ALLOWED_QTY_JSON]: JSON.stringify(allowedQty),
+      [F.OPP_REMAINING_QTY_JSON]: JSON.stringify(allowedQty),
+      [F.OPP_ALLOWED_SIZES]: allowedSizesArr.join(", "),
+    });
+  
+    initiateQuoteSessions.delete(stockMsgId);
+  
+    // Optional cleanup: remove buttons from the stock setup message
+    try {
+      const stockMsg = await interaction.channel?.messages.fetch(stockMsgId).catch(() => null);
+      if (stockMsg) {
+        await stockMsg.edit({ components: [] }).catch(() => {});
+        setTimeout(() => stockMsg.delete().catch(() => {}), 2500);
+      }
+    } catch {}
+  
+    await interaction.editReply(
+      `✅ Draft Opportunity created: **${created.id}** (${totalPairs} pairs). Supplier: **${supplierHit.sellerId}**`
+    );
+    scheduleDeleteInteractionReply(interaction, 5000);
+    return;
+  }
+
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith(`${INITQ.BASIC_MODAL}:`)) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
