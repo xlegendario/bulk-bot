@@ -146,6 +146,7 @@ export function registerLeaderboards(ctx) {
           "• Ranked by total invites into the server (via your personal invite link)",
           `• Top ${TOP_N} are displayed on the leaderboard`,
           "• **Top 3** receive prizes:",
+          "",
           "🥇 - €100",
           "🥈 - €50",
           "🥉 - €25",
