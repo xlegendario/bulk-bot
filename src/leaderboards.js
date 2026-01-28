@@ -165,7 +165,7 @@ export function registerLeaderboards(ctx) {
           "**When do I get paid?**",
           "• Earnings are calculated monthly",
           "• You receive a monthly DM summary after month end",
-          "• Payouts are handled by admins (timing announced in the server)",
+          "• Payouts are handled by admins",
           "",
           "**How do I see my stats if I'm not in the leaderboards?**",
           "• Use the **/mystats** command in any channel",
