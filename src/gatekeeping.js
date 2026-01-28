@@ -53,7 +53,7 @@ export function registerGatekeeping(ctx) {
         [
           "Access to this server is granted through a waitlist.",
           "",
-          "Requests are reviewed constantly and prioritized for active accounts."
+          "Requests are reviewed constantly and prioritized for active accounts.",
           "",
           "Inviting others is taken into account during approval.",
           "",
