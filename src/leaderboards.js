@@ -224,6 +224,66 @@ export function registerLeaderboards(ctx) {
     if (msg && SHOULD_PIN) await msg.pin().catch(() => {});
   }
 
+  async function ensureAffiliateProgramInfoMessage() {
+    const { AFFILIATE_INFO_CHANNEL_ID, AFFILIATE_INFO_PIN_MESSAGE = "true" } = env;
+    if (!AFFILIATE_INFO_CHANNEL_ID) return;
+  
+    const ch = await client.channels.fetch(String(AFFILIATE_INFO_CHANNEL_ID)).catch(() => null);
+    if (!ch || !ch.isTextBased()) {
+      console.warn("⚠️ AFFILIATE_INFO_CHANNEL_ID is not a text channel.");
+      return;
+    }
+  
+    const SHOULD_PIN = String(AFFILIATE_INFO_PIN_MESSAGE).toLowerCase() === "true";
+    const TITLE = "🤝 Affiliate Program — What It Is & How It Works";
+  
+    const embed = new EmbedBuilder()
+      .setTitle(TITLE)
+      .setColor(0xffd300)
+      .setDescription(
+        [
+          "**Leverage comes from buying together**",
+          "The more serious buyers we bring together, the more leverage we build.",
+          "That compounding power unlocks better supplier access, better pricing, and better opportunities for everyone.",
+          "",
+          "**Why this program exists**",
+          "We grow the community by rewarding the people who genuinely help expand it.",
+          "",
+          "**How you earn**",
+          `• You receive **€${FEE}** for each invited member who completes their **first deal** (qualified referral).`,
+          "• Earnings are calculated monthly and you receive a monthly DM summary after month end.",
+          "",
+          "**Leaderboards & prizes**",
+          "• Leaderboards track both **Top Inviters** and **Top Affiliates** each month.",
+          "• You must join the affiliate program to appear on the leaderboard.",
+          "",
+          "**How to join (required)**",
+          "1) Go to <#1464726003728519342>",
+          "2) Click **Get my Invite URL**",
+          "3) Share your personal link with everyone — that’s how invites are tracked",
+          "",
+          "**Important**",
+          "• No spam / fake accounts — abuse results in removal from the program.",
+        ].join("\n")
+      )
+      .setFooter({ text: "Kickz Caviar Wholesale" });
+  
+    const recent = await ch.messages.fetch({ limit: 25 }).catch(() => null);
+    const existing = recent?.find(
+      (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === TITLE
+    );
+  
+    if (existing) {
+      await existing.edit({ embeds: [embed], content: null }).catch(() => {});
+      if (SHOULD_PIN && !existing.pinned) await existing.pin().catch(() => {});
+      return;
+    }
+  
+    const msg = await ch.send({ embeds: [embed] }).catch(() => null);
+    if (msg && SHOULD_PIN) await msg.pin().catch(() => {});
+  }
+
+
   async function buildLeaderboardsForMonth(monthKey) {
     const rows = await fetchInviteRowsForMonth(monthKey);
 
@@ -475,6 +535,7 @@ export function registerLeaderboards(ctx) {
   client.once(Events.ClientReady, async () => {
     console.log("✅ Leaderboards module ready.");
     await registerMyStatsCommand().catch((e) => console.error("LB: command reg failed", e));
+    await ensureAffiliateProgramInfoMessage();
     await ensureLeaderboardInfoMessage();
     await tick();
     setInterval(tick, 10 * 60 * 1000);
