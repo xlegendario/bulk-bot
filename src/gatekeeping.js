@@ -53,15 +53,13 @@ export function registerGatekeeping(ctx) {
         [
           "Access to this server is granted through a waitlist.",
           "",
-          "Requests are reviewed regularly and prioritized for active accounts.",
-          "",
-          "**After joining the waitlist, you’ll receive an invite link by DM.**",
+          "Requests are reviewed constantly and prioritized for active accounts."
           "",
           "Inviting others is taken into account during approval.",
           "",
-          "*Leverage comes from buying together.*",
+          "***Leverage comes from buying together***",
           "",
-          "Click **Join Waitlist** below to request access.",
+          "Click **Get Access** below to request access.",
         ].join("\n")
       )
       .setColor(0xffd300);
@@ -69,7 +67,7 @@ export function registerGatekeeping(ctx) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(GK.APPLY_BTN)
-        .setLabel("Join Waitlist")
+        .setLabel("Get Access")
         .setEmoji("📝")
         .setStyle(ButtonStyle.Primary)
     );
