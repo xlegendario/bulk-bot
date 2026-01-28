@@ -140,7 +140,7 @@ export function registerLeaderboards(ctx) {
       .setColor(0xffd300)
       .setDescription(
         [
-          "**Two leaderboards are tracked each month:**",
+          "Two leaderboards are tracked each month:",
           "",
           "🔥 **Top Inviters**",
           "• Ranked by total invites into the server (via your personal invite link)",
