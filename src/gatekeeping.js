@@ -244,7 +244,6 @@ export function registerGatekeeping(ctx) {
               "\n**More active, serious buyers** mean **better pricing** for everyone.",
               "\n🔗 **Know other serious buyers like you?** Use this invite link:",
               `\n${inviteUrl}`,
-              "\nInvite activity is taken into account during approval.",
             ].join("\n")
           )
           .setColor(0xffd300);
