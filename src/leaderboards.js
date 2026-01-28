@@ -16,6 +16,8 @@ export function registerLeaderboards(ctx) {
 
     LEADERBOARD_CHANNEL_ID,
     WINNERS_CHANNEL_ID,
+    INFO_CHANNEL_ID,
+    INFO_PIN_MESSAGE = "true",
 
     LEADERBOARD_TOP_N = "10",
     REFERRAL_QUALIFIED_FIELD = "Referral Qualified",
@@ -119,6 +121,74 @@ export function registerLeaderboards(ctx) {
     const msg = await channel.send({ content: "🏆 Leaderboard initializing..." });
     await msg.pin().catch(() => {});
     return msg;
+  }
+
+  async function ensureLeaderboardInfoMessage() {
+    if (!INFO_CHANNEL_ID) return;
+  
+    const ch = await client.channels.fetch(String(INFO_CHANNEL_ID)).catch(() => null);
+    if (!ch || !ch.isTextBased()) {
+      console.warn("⚠️ INFO_CHANNEL_ID is not a text channel.");
+      return;
+    }
+  
+    const SHOULD_PIN = String(INFO_PIN_MESSAGE).toLowerCase() === "true";
+    const TITLE = "ℹ️ Leaderboards & Affiliate Rewards — How It Works";
+  
+    const embed = new EmbedBuilder()
+      .setTitle(TITLE)
+      .setColor(0xffd300)
+      .setDescription(
+        [
+          "**Two leaderboards are tracked each month:**",
+          "",
+          "🔥 **Top Inviters**",
+          "• Ranked by total invites into the server (via your personal invite link)",
+          `• Top ${TOP_N} are displayed on the leaderboard`,
+          "• **Top 3** receive prizes:",
+          "🥇 - €100",
+          "🥈 - €50",
+          "🥉 - €25",
+          "",
+          "💰 **Top Affiliates**",
+          "• Ranked by **qualified referrals** (invited members who complete their **first deal**)",
+          `• Earnings = **€${FEE}** per qualified referral`,
+          `• Top ${TOP_N} are displayed on the leaderboard`,
+          "",
+          "**How do I get my invite link?**",
+          "• Go to the <#1464726003728519342> channel and click **Get my Invite URL**",
+          "",
+          "**When does a referral become qualified?**",
+          "• When your invited member completes their **first deal**",
+          "",
+          "**When do I get paid?**",
+          "• Earnings are calculated monthly",
+          "• You receive a monthly DM summary after month end",
+          "• Payouts are handled by admins (timing announced in the server)",
+          "",
+          "**How do I see my stats if I'm not in the leaderboards?**",
+          "• Use the **/mystats** command in any channel",
+          "• The bot will send you your current, previous & overall stats",
+          "",          
+          "**Important**",
+          "• Abuse/spam/fake accounts may result in removal from the program",
+        ].join("\n")
+      )
+      .setFooter({ text: "Kickz Caviar Wholesale" });
+  
+    const recent = await ch.messages.fetch({ limit: 25 }).catch(() => null);
+    const existing = recent?.find(
+      (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === TITLE
+    );
+  
+    if (existing) {
+      await existing.edit({ embeds: [embed], content: null }).catch(() => {});
+      if (SHOULD_PIN && !existing.pinned) await existing.pin().catch(() => {});
+      return;
+    }
+  
+    const msg = await ch.send({ embeds: [embed] }).catch(() => null);
+    if (msg && SHOULD_PIN) await msg.pin().catch(() => {});
   }
 
   async function buildLeaderboardsForMonth(monthKey) {
@@ -373,6 +443,7 @@ export function registerLeaderboards(ctx) {
   client.once(Events.ClientReady, async () => {
     console.log("✅ Leaderboards module ready.");
     await registerMyStatsCommand().catch((e) => console.error("LB: command reg failed", e));
+    await ensureLeaderboardInfoMessage(); // ✅ add this line
     await tick();
     setInterval(tick, 10 * 60 * 1000);
   });
