@@ -22,7 +22,11 @@ export function registerLeaderboards(ctx) {
     LEADERBOARD_TOP_N = "10",
     REFERRAL_QUALIFIED_FIELD = "Referral Qualified",
     REFERRAL_FEE_EUR = "5",
-    DISCORD_TOKEN, // needed for slash command registration
+    DISCORD_TOKEN,
+
+    // ✅ Carryover config
+    AFFILIATE_LAUNCH_AT, // e.g. 2026-01-28T00:00:00+01:00
+    AFFILIATE_CARRYOVER_TO_MONTH, // e.g. 2026-02
   } = env;
 
   if (!LEADERBOARD_CHANNEL_ID || !WINNERS_CHANNEL_ID) {
@@ -36,7 +40,7 @@ export function registerLeaderboards(ctx) {
   const TOP_N = Math.max(3, Math.min(25, parseInt(LEADERBOARD_TOP_N, 10) || 10));
   const FEE = Number(REFERRAL_FEE_EUR) || 5;
 
-  const nameCache = new Map(); // discordId -> username
+  const nameCache = new Map();
 
   const escape = (v) => String(v || "").replace(/'/g, "\\'");
   const norm = (v) => String(v || "").trim();
@@ -55,6 +59,30 @@ export function registerLeaderboards(ctx) {
     const d = new Date(Date.UTC(y, m - 1, 1));
     d.setUTCMonth(d.getUTCMonth() - 1);
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+
+  // ✅ Carryover-aware month filter formula:
+  // - Normal months: {Month Key}='YYYY-MM'
+  // - For the carryover month: include late previous-month rows based on {Joined At} >= LAUNCH_AT
+  function monthFilterFormula(monthKey) {
+    let base = `{Month Key}='${escape(monthKey)}'`;
+
+    if (
+      AFFILIATE_CARRYOVER_TO_MONTH &&
+      AFFILIATE_LAUNCH_AT &&
+      monthKey === String(AFFILIATE_CARRYOVER_TO_MONTH).trim()
+    ) {
+      const prev = prevMonthKey(monthKey);
+      base = `OR(
+        {Month Key}='${escape(monthKey)}',
+        AND(
+          {Month Key}='${escape(prev)}',
+          IS_AFTER({Joined At}, DATETIME_PARSE('${AFFILIATE_LAUNCH_AT}'))
+        )
+      )`;
+    }
+
+    return base;
   }
 
   async function getDiscordUsername(discordId) {
@@ -84,7 +112,6 @@ export function registerLeaderboards(ctx) {
   function formatTable(headers, rows, col1Width = 18) {
     const h1 = String(headers[0]).padEnd(col1Width);
     const h2 = String(headers[1]);
-
     const sep = "─".repeat(col1Width + h2.length);
 
     const body = rows.map(([a, b]) => {
@@ -99,7 +126,7 @@ export function registerLeaderboards(ctx) {
     return (
       (await invitesLogTable
         .select({
-          filterByFormula: `{Month Key}='${escape(monthKey)}'`,
+          filterByFormula: monthFilterFormula(monthKey),
           fields: ["Inviter Discord User ID", REFERRAL_QUALIFIED_FIELD],
         })
         .all()
@@ -125,16 +152,16 @@ export function registerLeaderboards(ctx) {
 
   async function ensureLeaderboardInfoMessage() {
     if (!INFO_CHANNEL_ID) return;
-  
+
     const ch = await client.channels.fetch(String(INFO_CHANNEL_ID)).catch(() => null);
     if (!ch || !ch.isTextBased()) {
       console.warn("⚠️ INFO_CHANNEL_ID is not a text channel.");
       return;
     }
-  
+
     const SHOULD_PIN = String(INFO_PIN_MESSAGE).toLowerCase() === "true";
     const TITLE = "ℹ️ Leaderboards & Affiliate Rewards — How It Works";
-  
+
     const embed = new EmbedBuilder()
       .setTitle(TITLE)
       .setColor(0xffd300)
@@ -170,24 +197,29 @@ export function registerLeaderboards(ctx) {
           "**How do I see my stats if I'm not in the leaderboards?**",
           "• Use the **/mystats** command in any channel",
           "• The bot will send you your current, previous & overall stats",
-          "",          
+          "",
+          ...(AFFILIATE_CARRYOVER_TO_MONTH && AFFILIATE_LAUNCH_AT
+            ? [
+                "**Launch carryover**",
+                `• Invites after **${AFFILIATE_LAUNCH_AT}** will count towards **${AFFILIATE_CARRYOVER_TO_MONTH}**`,
+                "",
+              ]
+            : []),
           "**Important**",
           "• Abuse/spam/fake accounts may result in removal from the program",
         ].join("\n")
       )
       .setFooter({ text: "Kickz Caviar Wholesale" });
-  
+
     const recent = await ch.messages.fetch({ limit: 25 }).catch(() => null);
-    const existing = recent?.find(
-      (m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === TITLE
-    );
-  
+    const existing = recent?.find((m) => m.author?.id === client.user.id && m.embeds?.[0]?.title === TITLE);
+
     if (existing) {
       await existing.edit({ embeds: [embed], content: null }).catch(() => {});
       if (SHOULD_PIN && !existing.pinned) await existing.pin().catch(() => {});
       return;
     }
-  
+
     const msg = await ch.send({ embeds: [embed] }).catch(() => null);
     if (msg && SHOULD_PIN) await msg.pin().catch(() => {});
   }
@@ -217,20 +249,14 @@ export function registerLeaderboards(ctx) {
       .sort((a, b) => b[1] - a[1])
       .slice(0, TOP_N);
 
-    // Rows for column tables
     const inviteRows = [];
-    for (const [id, c] of topInvites) {
-      inviteRows.push([await getDiscordUsername(id), String(c)]);
-    }
+    for (const [id, c] of topInvites) inviteRows.push([await getDiscordUsername(id), String(c)]);
+
     const affiliateRows = [];
-    for (const [id, q] of topAffiliates) {
-      affiliateRows.push([await getDiscordUsername(id), `€${q * FEE}`]);
-    }
+    for (const [id, q] of topAffiliates) affiliateRows.push([await getDiscordUsername(id), `€${q * FEE}`]);
 
     const inviteTable =
-      inviteRows.length > 0
-        ? formatTable(["User", "Invites"], inviteRows)
-        : "No invites yet this month.";
+      inviteRows.length > 0 ? formatTable(["User", "Invites"], inviteRows) : "No invites yet this month.";
 
     const affiliateTable =
       affiliateRows.length > 0
@@ -244,7 +270,7 @@ export function registerLeaderboards(ctx) {
     const rows = await invitesLogTable
       .select({
         filterByFormula: `AND(
-          {Month Key}='${escape(monthKey)}',
+          ${monthFilterFormula(monthKey)},
           {${escape(REFERRAL_QUALIFIED_FIELD)}}=TRUE()
         )`,
         fields: ["Inviter Discord User ID"],
@@ -296,7 +322,7 @@ export function registerLeaderboards(ctx) {
 
     const rows = await invitesLogTable
       .select({
-        filterByFormula: `{Month Key}='${escape(monthKey)}'`,
+        filterByFormula: monthFilterFormula(monthKey),
         fields: ["Inviter Discord User ID", REFERRAL_QUALIFIED_FIELD],
       })
       .all()
@@ -328,9 +354,7 @@ export function registerLeaderboards(ctx) {
 
     let invites = rows.length;
     let qualified = 0;
-    for (const r of rows) {
-      if (r.fields?.[REFERRAL_QUALIFIED_FIELD]) qualified++;
-    }
+    for (const r of rows) if (r.fields?.[REFERRAL_QUALIFIED_FIELD]) qualified++;
 
     return { invites, qualified, earned: qualified * FEE };
   }
@@ -419,8 +443,15 @@ export function registerLeaderboards(ctx) {
             { name: "💰 Top Affiliates", value: data.affiliateTable }
           );
 
-        await winnersChannel.send({ embeds: [finalEmbed] }).catch(() => {});
-        await sendMonthlyEarningsDMs(prev);
+        // Optional: avoid posting empty months
+        const isEmptyMonth =
+          data.inviteTable.includes("No invites yet") && data.affiliateTable.includes("No qualified");
+        if (!isEmptyMonth) {
+          await winnersChannel.send({ embeds: [finalEmbed] }).catch(() => {});
+          await sendMonthlyEarningsDMs(prev);
+        } else {
+          console.log(`LB: ${prev} had no data, skipping winners post & DMs`);
+        }
       }
 
       currentMonth = nowMonth;
@@ -444,7 +475,7 @@ export function registerLeaderboards(ctx) {
   client.once(Events.ClientReady, async () => {
     console.log("✅ Leaderboards module ready.");
     await registerMyStatsCommand().catch((e) => console.error("LB: command reg failed", e));
-    await ensureLeaderboardInfoMessage(); // ✅ add this line
+    await ensureLeaderboardInfoMessage();
     await tick();
     setInterval(tick, 10 * 60 * 1000);
   });
