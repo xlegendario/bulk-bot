@@ -5761,12 +5761,13 @@ app.post("/post-opportunity", async (req, res) => {
 
     const BULK_PING_ROLE_ID = "1463974368949440532";
 
-    await channel.send({
-      content: `<@&${BULK_PING_ROLE_ID}>`, // 👈 role mention
+    // ✅ capture the sent message so msg.id exists
+    const msg = await channel.send({
+      content: `<@&${BULK_PING_ROLE_ID}>`,
       embeds: [embed],
       components: [row],
       allowedMentions: {
-        roles: [BULK_PING_ROLE_ID], // 👈 important
+        roles: [BULK_PING_ROLE_ID],
       },
     });
 
@@ -5782,6 +5783,7 @@ app.post("/post-opportunity", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+
 
 app.post("/sync-opportunity", async (req, res) => {
   try {
