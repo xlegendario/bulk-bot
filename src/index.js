@@ -3781,31 +3781,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // =========================
 
   if (interaction.isButton() && (interaction.customId === INITQADM.BTN_BASIC || interaction.customId === INITQADM.BTN_SPECIFIC)) {
+    // ✅ ACK immediately (prevents “Interaction failed”)
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+    
     // Staff only
     const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
     if (!member || !isStaffMember(member)) {
-      await interaction.reply({ content: "⛔ Staff only.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction.editReply("⛔ Staff only.").catch(() => {});
       return;
     }
   
     // Optional: force only in admin channel
     if (ADMIN_INITIATE_QUOTES_CHANNEL_ID && interaction.channelId !== String(ADMIN_INITIATE_QUOTES_CHANNEL_ID)) {
-      await interaction.reply({ content: "⚠️ Use this in the Admin Initiate Quotes channel.", flags: MessageFlags.Ephemeral }).catch(() => {});
+      await interaction.editReply("⚠️ Use this in the Admin Initiate Quotes channel.").catch(() => {});
       return;
     }
   
     const mode = interaction.customId === INITQADM.BTN_SPECIFIC ? "specific" : "basic";
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   
     const presets = await fetchAllBrandPresets();
     if (!presets.length) {
-      await interaction.editReply("❌ No brand presets found in Airtable (Size Presets table).");
+      await interaction.editReply("❌ No brand presets found in Airtable (Size Presets table).").catch(() => {});
       return;
     }
   
     const embed = buildSelectBrandEmbed(mode);
   
-    // Build rows with admin brand prefix
     const rows = [];
     for (let i = 0; i < presets.length; i += 5) {
       const chunk = presets.slice(i, i + 5);
@@ -3822,10 +3823,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (rows.length >= 5) break;
     }
   
-    await interaction.editReply({ embeds: [embed], components: rows });
+    await interaction.editReply({ embeds: [embed], components: rows }).catch(() => {});
     scheduleDeleteInteractionReply(interaction, 15000);
     return;
   }
+
 
   if (interaction.isButton() && interaction.customId.startsWith(`${INITQADM.BRAND}:`)) {
     const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
@@ -4014,28 +4016,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // INITIATE QUOTE (Supplier): open Select Brand
   // =========================
   if (interaction.isButton() && (interaction.customId === INITQ.BTN_BASIC || interaction.customId === INITQ.BTN_SPECIFIC)) {
-    // Safety: only allow inside supplier guild if you want
+    // ✅ ACK immediately
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+  
     if (SUPPLIER_GUILD_ID && interaction.guildId !== String(SUPPLIER_GUILD_ID)) {
-      await interaction.reply({ content: "Not allowed here.", flags: MessageFlags.Ephemeral });
+      await interaction.editReply("Not allowed here.").catch(() => {});
       return;
     }
-
+  
     const mode = interaction.customId === INITQ.BTN_SPECIFIC ? "specific" : "basic";
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
+  
     const presets = await fetchAllBrandPresets();
     if (!presets.length) {
-      await interaction.editReply("❌ No brand presets found in Airtable (Size Presets table).");
+      await interaction.editReply("❌ No brand presets found in Airtable (Size Presets table).").catch(() => {});
       return;
     }
-
+  
     const embed = buildSelectBrandEmbed(mode);
     const rows = buildBrandRows(mode, presets);
-
-    await interaction.editReply({ embeds: [embed], components: rows });
+  
+    await interaction.editReply({ embeds: [embed], components: rows }).catch(() => {});
     scheduleDeleteInteractionReply(interaction, 15000);
     return;
   }
+
 
   // =========================
   // INITIATE QUOTE (Supplier): Brand selected
