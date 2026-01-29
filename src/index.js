@@ -5759,7 +5759,16 @@ app.post("/post-opportunity", async (req, res) => {
     const channel = await client.channels.fetch(String(BULK_PUBLIC_CHANNEL_ID));
     if (!channel || !channel.isTextBased()) return res.status(500).json({ ok: false, error: "Public channel not found" });
 
-    const msg = await channel.send({ embeds: [embed], components: [row] });
+    const BULK_PING_ROLE_ID = "1463974368949440532";
+
+    await channel.send({
+      content: `<@&${BULK_PING_ROLE_ID}>`, // 👈 role mention
+      embeds: [embed],
+      components: [row],
+      allowedMentions: {
+        roles: [BULK_PING_ROLE_ID], // 👈 important
+      },
+    });
 
     await oppsTable.update(opportunityRecordId, {
       "Discord Public Channel ID": String(BULK_PUBLIC_CHANNEL_ID),
