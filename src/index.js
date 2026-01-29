@@ -890,6 +890,9 @@ const BUYER_ONB = {
 // userId -> { oppId, countryName, fullName, companyName, vatId, email }
 const pendingBuyerOnboarding = new Map();
 
+// ✅ ADD THIS
+const initiateQuoteSessions = new Map();
+
 const buyerCountryOptions = [
   "Austria",
   "Belgium",
